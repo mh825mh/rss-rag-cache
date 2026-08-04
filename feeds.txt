@@ -1,0 +1,7 @@
+# Add one RSS/Atom URL per line.
+# Lines starting with # are ignored. Blank lines are ignored.
+https://news.ycombinator.com/rss
+https://feeds.bbci.co.uk/news/rss.xml
+https://www.theverge.com/rss/index.xml
+https://lore.kernel.org/linux-kernel/newest/rss
+https://blog.rust-lang.org/feed.xml
