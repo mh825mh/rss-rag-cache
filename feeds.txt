@@ -1,0 +1,3 @@
+# Add one RSS/Atom URL per line.
+# Lines starting with # are ignored. Blank lines are ignored.
+https://www.penninewaterways.co.uk/rss.htm

@@ -1,0 +1,8 @@
+{
+  "type": "plugin",
+  "runner": "node",
+  "owner": "mh825",
+  "name": "rss-rag-cache",
+  "revision": 1,
+  "dependencies": []
+}
