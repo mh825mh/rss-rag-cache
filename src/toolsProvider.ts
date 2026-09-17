@@ -5,6 +5,10 @@ import { runRetention } from "../lib/retention.js";
 import { refreshFeeds, retrieve } from "../lib/retriever.js";
 import { loadSettings, loadFeeds } from "../lib/config.js";
 
+function isoDate(ts) {
+  return Number.isFinite(ts) ? new Date(ts).toISOString() : new Date(Date.now()).toISOString();
+}
+
 export async function toolsProvider(_ctl: any) {
   return [
     tool({
@@ -27,6 +31,7 @@ export async function toolsProvider(_ctl: any) {
           results: filtered.map((r: any) => ({
             title: r.title,
             link: r.link,
+            feed: r.feed,
             date: r.pub_date_iso,
             snippet: r.text.slice(0, 600),
           })),
@@ -78,7 +83,7 @@ export async function toolsProvider(_ctl: any) {
           articles: articles.map((a: any) => ({ 
             title: a.title, 
             link: a.link, 
-            date: new Date(a.pub_date).toISOString(), 
+            date: isoDate(a.pub_date), 
             feed: a.feed_url 
           })) 
         };

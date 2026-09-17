@@ -41,13 +41,17 @@ Add one RSS/Atom URL per line. You can also add standard webpage URLs (the plugi
 
 You can adjust these values in the LM Studio plugin settings panel:
 Setting
-	
+ 	
 Default
-	
+ 	
 Description
 retentionDays	90	How long to keep articles (30, 60, 90, or 365 days).
 refreshIntervalHours	6	How often the plugin automatically fetches new RSS items in the background.
 embeddingModel	nomic-embed-text-v1.5	The exact model ID loaded in your LM Studio server.
+topK	8	How many unique articles to return per search.
+chunkSize	800	Length (in characters) of each text chunk used for embedding and search.
+embedBatchSize	16	How many chunks are sent to the embedding model per request (higher = faster but more VRAM).
+scrapeFullText	Off	For HTML-scraped pages, also download each article's full body text (slower refresh, richer content).
   
 🛠️ LM Studio Tools
 

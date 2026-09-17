@@ -44,4 +44,56 @@ export const configSchematics = createConfigSchematics()
     },
     "nomic-embed-text-v1.5",
   )
+  .field(
+    "topK",
+    "numeric",
+    {
+      displayName: "Search Results (Top K)",
+      subtitle: "How many unique articles to return per search.",
+      min: 1,
+      max: 50,
+      int: true,
+      slider: { step: 1, min: 1, max: 20 },
+    },
+    8,
+  )
+  .field(
+    "chunkSize",
+    "numeric",
+    {
+      displayName: "Chunk Size (characters)",
+      subtitle: "Article text is split into overlapping chunks of this length.",
+      min: 200,
+      max: 3000,
+      int: true,
+      slider: { step: 100, min: 200, max: 3000 },
+    },
+    800,
+  )
+  .field(
+    "embedBatchSize",
+    "numeric",
+    {
+      displayName: "Embedding Batch Size",
+      subtitle: "How many chunks to send to the embedding model per request.",
+      min: 1,
+      max: 128,
+      int: true,
+      slider: { step: 1, min: 1, max: 64 },
+    },
+    16,
+  )
+  .field(
+    "scrapeFullText",
+    "select",
+    {
+      displayName: "Fetch Full Article Text",
+      subtitle: "For scraped HTML pages, also download each article body (slower refresh).",
+      options: [
+        { value: "false", displayName: "Off (default)" },
+        { value: "true", displayName: "On — slow but richer content" },
+      ],
+    },
+    "false",
+  )
   .build();
