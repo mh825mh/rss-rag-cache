@@ -1,0 +1,34 @@
+{
+  "name": "rss-rag-cache",
+  "version": "1.0.0",
+  "description": "RSS RAG cache with configurable retention (30/60/90/365 days)",
+  "author": "you",
+  "main": "index.js",
+  "tools": ["index.js"],
+  "settings": {
+    "retentionDays": {
+      "type": "number",
+      "enum": [30, 60, 90, 365],
+      "default": 90,
+      "description": "How long to keep cached RSS entries"
+    },
+    "refreshIntervalHours": {
+      "type": "number",
+      "default": 6,
+      "description": "How often to refresh feeds"
+    },
+    "embeddingModel": {
+      "type": "string",
+      "default": "nomic-embed-text-v1.5",
+      "description": "Local embedding model id loaded in LM Studio"
+    },
+    "topK": {
+      "type": "number",
+      "default": 8
+    },
+    "feedsFile": {
+      "type": "string",
+      "default": "feeds.txt"
+    }
+  }
+}
