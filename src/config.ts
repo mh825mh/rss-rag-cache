@@ -84,16 +84,57 @@ export const configSchematics = createConfigSchematics()
     16,
   )
   .field(
+    "maxConcurrentFeeds",
+    "numeric",
+    {
+      displayName: "Concurrent Feed Fetches",
+      subtitle: "How many RSS/Atom feeds to fetch at the same time.",
+      min: 1,
+      max: 32,
+      int: true,
+      slider: { step: 1, min: 1, max: 16 },
+    },
+    8,
+  )
+  .field(
+    "htmlLinkPatterns",
+    "string",
+    {
+      displayName: "HTML Link Keywords",
+      subtitle: "Comma-separated URL keywords used when scraping non-RSS pages.",
+      placeholder: "news,article,post,blog,stories,press",
+    },
+    "news,article,post,blog,stories,press",
+  )
+  .field(
     "scrapeFullText",
-    "select",
+    "boolean",
     {
       displayName: "Fetch Full Article Text",
       subtitle: "For scraped HTML pages, also download each article body (slower refresh).",
+    },
+    false,
+  )
+  .field(
+    "retentionBasis",
+    "select",
+    {
+      displayName: "Retention Basis",
+      subtitle: "Whether old entries are removed by publish date or cache date.",
       options: [
-        { value: "false", displayName: "Off (default)" },
-        { value: "true", displayName: "On — slow but richer content" },
+        { value: "publish_date", displayName: "Publish date (recommended)" },
+        { value: "cached_at", displayName: "Cached date" },
       ],
     },
-    "false",
+    "publish_date",
+  )
+  .field(
+    "refreshOnStartup",
+    "boolean",
+    {
+      displayName: "Refresh on Startup",
+      subtitle: "Automatically fetch feeds when the plugin loads.",
+    },
+    true,
   )
   .build();
