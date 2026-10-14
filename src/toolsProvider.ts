@@ -2,10 +2,11 @@ import { tool, ToolsProviderController } from "@lmstudio/sdk";
 import { z } from "zod";
 import { statSync } from "node:fs";
 import { getDb, getMeta, setMeta, getAllFeedStates } from "../lib/db.js";
-import { getDbPath, getSettings, setSettings, loadFeeds, appendFeed, removeFeed } from "../lib/config.js";
+import { getDbPath, getSettings, setSettings, loadFeeds, loadEnabledFeeds, loadFeedConfig, appendFeed, removeFeed, setFeedOptions } from "../lib/config.js";
 import { configSchematics, globalConfigSchematics } from "./config";
 import { runRetention, pruneRemovedFeeds, getLastRefresh } from "../lib/retention.js";
-import { refreshFeedsShared, retrieve, reindexMissing, reembedAll } from "../lib/retriever.js";
+import { refreshFeedsShared, retrieve, reindexMissing, reembedAll, backfillEmbeddings } from "../lib/retriever.js";
+import { getDiagnostics } from "../lib/diagnostics.js";
 import { testFeed } from "../lib/fetcher.js";
 
 function isoDate(ts: number) {
@@ -28,6 +29,7 @@ function settingsFromController(ctl: ToolsProviderController) {
       embeddingModel: g.get("embeddingModel"),
       chunkSize: g.get("chunkSize"),
       embedBatchSize: g.get("embedBatchSize"),
+      embedConcurrency: g.get("embedConcurrency"),
       maxConcurrentFeeds: g.get("maxConcurrentFeeds"),
       semanticScanLimit: g.get("semanticScanLimit"),
       htmlLinkPatterns: g.get("htmlLinkPatterns"),
@@ -60,27 +62,40 @@ function getStats() {
 }
 
 async function refreshAll(s: ReturnType<typeof getSettings>, force = true) {
-  const feeds = loadFeeds(s);
+  const feeds = loadEnabledFeeds(s);
   const res = await refreshFeedsShared(s, feeds, { force });
   const ret = runRetention(s.retentionDays, s.retentionBasis || "publish_date");
+
+  // Self-heal any embedding gaps left by a model that was offline mid-index.
+  let backfill: any = null;
+  try {
+    backfill = await backfillEmbeddings(s, { batchSize: 500, maxBatches: 8 });
+  } catch (e) {
+    backfill = { error: (e as Error).message };
+  }
+
   setMeta("last_refresh", JSON.stringify({
     timestamp: Date.now(),
     added: res.added,
+    updated: res.updated ?? 0,
     totalTimeSeconds: res.totalTimeSeconds,
     notModified: res.notModified,
     fastSuccess: res.fastMode.success,
     slowSuccess: res.slowMode.success.length,
     failedFeeds: res.failedFeeds,
     retention: ret,
+    backfill,
   }));
   return {
     feeds: feeds.length,
     added: res.added,
+    updated: res.updated ?? 0,
     notModified: res.notModified,
     skippedBackoff: res.skippedBackoff?.length ?? 0,
     failedCount: res.failedFeeds.length,
     failedFeeds: res.failedFeeds,
     retention: ret,
+    backfill,
   };
 }
 
@@ -91,16 +106,25 @@ export async function toolsProvider(ctl: ToolsProviderController) {
   return [
     tool({
       name: "search_rss_cache",
-      description: "Semantic + keyword search over the local RSS RAG cache. Optionally filter by days, feed (URL substring), or author.",
+      description: "Semantic + keyword hybrid search over the local RSS RAG cache. Filter by recency (days or after/before), feed (URL substring), author, or tag. Sort by relevance (default) or date, and paginate with limit/offset.",
       parameters: {
         query: z.string(),
         days: z.number().optional(),
+        after: z.string().optional(),
+        before: z.string().optional(),
         feed: z.string().optional(),
         author: z.string().optional(),
+        tag: z.string().optional(),
+        sort: z.enum(["relevance", "date"]).optional(),
+        limit: z.number().optional(),
+        offset: z.number().optional(),
       },
-      implementation: async ({ query, days, feed, author }: { query: string; days?: number; feed?: string; author?: string }) => {
+      implementation: async ({ query, days, after, before, feed, author, tag, sort, limit, offset }: {
+        query: string; days?: number; after?: string; before?: string; feed?: string; author?: string;
+        tag?: string; sort?: "relevance" | "date"; limit?: number; offset?: number;
+      }) => {
         const s = getSettings();
-        const results = await retrieve(query, s, { days, feed, author });
+        const results = await retrieve(query, s, { days, after, before, feed, author, tag, sort, limit, offset });
 
         if (!results.length) return { count: 0, results: [], note: "No matches." };
 
@@ -112,7 +136,9 @@ export async function toolsProvider(ctl: ToolsProviderController) {
             feed: r.feed,
             author: r.author,
             date: r.pub_date_iso,
+            tags: r.tags,
             score: typeof r.score === "number" ? Number(r.score.toFixed(3)) : undefined,
+            similarity: typeof r.similarity === "number" ? Number(r.similarity.toFixed(3)) : undefined,
             snippet: (r.text || "").slice(0, 600),
           })),
         };
@@ -135,7 +161,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
       parameters: {},
       implementation: async () => {
         const s = getSettings();
-        const feeds = loadFeeds(s);
+        const feedConfigs = loadFeedConfig(s);
         const stats = getStats();
         const lastRefresh = getLastRefresh();
         let lastReport = null;
@@ -154,7 +180,8 @@ export async function toolsProvider(ctl: ToolsProviderController) {
           error: f.last_error || undefined,
         }));
         return {
-          feeds,
+          feeds: feedConfigs,
+          feedUrls: feedConfigs.map((f: any) => f.url),
           feedStates,
           entries: stats.entries,
           chunks: stats.chunks,
@@ -272,6 +299,38 @@ export async function toolsProvider(ctl: ToolsProviderController) {
         db.exec("ANALYZE");
         const afterBytes = sizeOf();
         return { beforeBytes, afterBytes, savedBytes: Math.max(0, beforeBytes - afterBytes) };
+      }
+    }),
+    tool({
+      name: "set_feed_options",
+      description: "Set per-feed options (stored in feeds.json): enabled, tags, scrapeFullText, linkPatterns, maxItems, headers. Only the supplied fields change. Use tags later as a search filter.",
+      parameters: {
+        url: z.string(),
+        enabled: z.boolean().optional(),
+        tags: z.array(z.string()).optional(),
+        scrapeFullText: z.boolean().optional(),
+        linkPatterns: z.string().optional(),
+        maxItems: z.number().optional(),
+        headers: z.record(z.string()).optional(),
+      },
+      implementation: async (args: {
+        url: string; enabled?: boolean; tags?: string[]; scrapeFullText?: boolean;
+        linkPatterns?: string; maxItems?: number; headers?: Record<string, string>;
+      }) => {
+        const s = getSettings();
+        const { url, ...options } = args;
+        const cleaned: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(options)) if (v !== undefined) cleaned[k] = v;
+        if (!Object.keys(cleaned).length) return { ok: false, reason: "No options supplied" };
+        return setFeedOptions(url, cleaned, s);
+      }
+    }),
+    tool({
+      name: "cache_diagnostics",
+      description: "Report cache health: entry/chunk counts, embedding coverage and gaps, DB/WAL size, feed backoff state, embedding model/dimension, schema version, and suggested actions.",
+      parameters: {},
+      implementation: async () => {
+        return getDiagnostics(getSettings());
       }
     }),
   ];

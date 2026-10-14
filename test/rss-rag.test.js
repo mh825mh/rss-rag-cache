@@ -254,3 +254,127 @@ test("retrieve returns a blended score and a bounded snippet", async () => {
   assert.equal(typeof r.text, "string");
   assert.ok(r.text.length <= 620, "snippet should be bounded");
 });
+
+// --- v1.2.0 additions -------------------------------------------------------
+
+test("chunkText respects sentence boundaries and never splits words", () => {
+  const text = "First sentence is here. Second sentence follows. Third sentence ends it. Fourth one is longer and carries more words.";
+  const chunks = chunkText(text, 60, 0);
+  assert.ok(chunks.length >= 1);
+  for (const c of chunks) assert.ok(c.length <= 80, `chunk too long: ${c.length}`);
+  const joined = chunks.join(" ");
+  for (const w of ["First", "sentence", "Second", "Third", "Fourth", "carries"]) {
+    assert.ok(joined.includes(w), `missing word ${w}`);
+  }
+  assert.match(chunks[0], /[.!?]$/, "a chunk should end at a sentence boundary, not mid-word");
+});
+
+test("indexEntries re-indexes an entry when its content changes", async () => {
+  const db = getDb();
+  const s = testSettings();
+  const g = "g-change-1";
+  const base = { guid: g, title: "Changing Article", link: "https://x/c1", feed_url: "https://f/c", pub_date: Date.now() };
+
+  const r1 = await indexEntries([{ ...base, content: "original body about apples" }], s);
+  assert.equal(r1.added, 1);
+
+  // Identical content again → a no-op (no needless re-embedding).
+  const r2 = await indexEntries([{ ...base, content: "original body about apples" }], s);
+  assert.equal(r2.added, 0);
+  assert.equal(r2.updated, 0);
+
+  // Changed content → the entry is updated and its chunks rebuilt.
+  const r3 = await indexEntries([{ ...base, content: "completely new body about oranges and pears" }], s);
+  assert.equal(r3.added, 0);
+  assert.equal(r3.updated, 1);
+
+  const entry = db.prepare(`SELECT id, content FROM entries WHERE guid = ?`).get(g);
+  assert.match(entry.content, /oranges/);
+  const chunks = db.prepare(`SELECT embedding FROM chunks WHERE entry_id = ?`).all(entry.id);
+  assert.ok(chunks.length >= 1);
+  for (const c of chunks) assert.notEqual(c.embedding, null);
+});
+
+test("feeds.json overrides (tags/enabled) drive filtering and the fetch list", async () => {
+  const { setFeedOptions, loadFeedConfig, loadEnabledFeeds, getSettings } = await import("../lib/config.js");
+  const s = getSettings();
+  const url = "https://example.com/tagged";
+
+  removeFeed(url);
+  assert.equal(appendFeed(url).ok, true);
+  assert.equal(setFeedOptions(url, { tags: ["Tech", "AI"], enabled: true }, s).ok, true);
+
+  const cfg = loadFeedConfig(s).find((f) => f.url === url);
+  assert.ok(cfg);
+  assert.deepEqual(cfg.tags, ["Tech", "AI"]);
+
+  // Disabled feeds remain configured but are excluded from the fetch list.
+  setFeedOptions(url, { enabled: false }, s);
+  assert.equal(loadEnabledFeeds(s).some((f) => f.url === url), false);
+  assert.equal(loadFeeds(s).includes(url), true);
+
+  // A tagged entry is retrievable via the tag filter.
+  await indexEntries([{
+    guid: "g-tagged", title: "Tagged Tech Story", link: "https://example.com/tagged/1",
+    feed_url: url, tags: ["tech", "ai"], content: "quantum widgets explained in depth", pub_date: Date.now(),
+  }], testSettings());
+  const hit = await retrieve("quantum widgets", testSettings(), { tag: "tech" });
+  assert.ok(hit.some((r) => /Tagged Tech Story/.test(r.title)), "tag filter should find the tagged entry");
+  const miss = await retrieve("quantum widgets", testSettings(), { tag: "sports" });
+  assert.equal(miss.length, 0);
+
+  removeFeed(url); // cleanup: drop from feeds.txt and feeds.json
+});
+
+test("retrieve supports date sort and pagination", async () => {
+  const s = testSettings();
+  const feed = "https://f/page";
+  const now = Date.now();
+  const mk = (n, daysAgo) => ({
+    guid: `g-page-${n}`, title: `Pagination Story ${n}`, link: `https://x/p/${n}`,
+    feed_url: feed,
+    content: n === 1
+      ? "pagination uniqueword alpha reporting on deep sea coral reefs and marine biodiversity surveys"
+      : n === 2
+        ? "pagination uniqueword beta covering quarterly stock market earnings and investor sentiment indexes"
+        : "pagination uniqueword gamma reviewing alpine mountain climbing gear ropes and safety harnesses",
+    pub_date: now - daysAgo * 86400e3,
+  });
+  await indexEntries([mk(1, 10), mk(2, 5), mk(3, 1)], s);
+
+  const page1 = await retrieve("pagination uniqueword", s, { feed, limit: 2, offset: 0 });
+  assert.equal(page1.length, 2);
+  const page2 = await retrieve("pagination uniqueword", s, { feed, limit: 2, offset: 2 });
+  assert.ok(page2.length >= 1);
+  const links1 = new Set(page1.map((r) => r.link));
+  assert.ok(page2.every((r) => !links1.has(r.link)), "pages must not overlap");
+
+  const byDate = await retrieve("pagination uniqueword", s, { feed, sort: "date", limit: 10 });
+  assert.ok(byDate.length >= 2);
+  for (let i = 1; i < byDate.length; i++) {
+    assert.ok(Date.parse(byDate[i - 1].pub_date_iso) >= Date.parse(byDate[i].pub_date_iso));
+  }
+});
+
+test("retrieve collapses syndicated near-duplicate content (SimHash)", async () => {
+  const s = testSettings();
+  const body = "the quick brown fox jumps over the lazy dog while the sun sets slowly over the quiet hills and rivers flow onward";
+  await indexEntries([
+    { guid: "g-dup-a", title: "Sunset Over The Hills", link: "https://a/dup", feed_url: "https://f/dup", content: body, pub_date: Date.now() },
+    { guid: "g-dup-b", title: "Another Take On Hills", link: "https://b/dup", feed_url: "https://f/dup", content: body, pub_date: Date.now() },
+  ], s);
+
+  const res = await retrieve("quiet hills sunset", s, { feed: "https://f/dup" });
+  const hits = res.filter((r) => /Hills/.test(r.title));
+  assert.equal(hits.length, 1, "identical bodies should collapse to a single result");
+});
+
+test("getDiagnostics reports counts, coverage, schema version and suggestions", async () => {
+  const { getDiagnostics } = await import("../lib/diagnostics.js");
+  const d = getDiagnostics(testSettings());
+  assert.ok(d.entries >= 1);
+  assert.ok(d.chunks >= 1);
+  assert.equal(typeof d.embeddingCoveragePct, "number");
+  assert.ok(Array.isArray(d.suggestions) && d.suggestions.length >= 1);
+  assert.equal(d.schemaVersion, 6);
+});

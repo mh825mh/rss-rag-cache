@@ -90,6 +90,19 @@ export const globalConfigSchematics = createConfigSchematics()
     16,
   )
   .field(
+    "embedConcurrency",
+    "numeric",
+    {
+      displayName: "Embedding Concurrency",
+      subtitle: "How many embedding requests to run in parallel during indexing/backfill.",
+      min: 1,
+      max: 16,
+      int: true,
+      slider: { step: 1, min: 1, max: 8 },
+    },
+    3,
+  )
+  .field(
     "maxConcurrentFeeds",
     "numeric",
     {
