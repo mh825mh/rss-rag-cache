@@ -8,7 +8,10 @@ Instead of searching the web, your LLM can instantly query your local cache of r
 
 - **Local RAG Pipeline**: Fetches RSS feeds, chunks text, and generates embeddings via LM Studio's local server.
 - **Hybrid Search**: Combines SQLite FTS5 (trigram keyword search, great for CJK and noisy text) with a bounded semantic full-scan (vector cosine similarity over the cache). If the embedding model is offline, it automatically falls back to pure keyword search.
-- **Retry & Backoff**: Fetch requests retry on 429/403/5xx using `Retry-After` (capped at 15s), so flaky or rate-limited feeds fail gracefully instead of erroring out.
+- **Conditional Fetching**: Background refreshes send `If-None-Match` / `If-Modified-Since` (ETag / Last-Modified) so unchanged feeds answer `304 Not Modified` and cost almost no bandwidth. A manual refresh (or `force: true`) re-downloads everything.
+- **Retry & Per-Feed Backoff**: Requests retry on 429/403/5xx using `Retry-After` (capped at 15s). Feeds that keep failing are placed in an exponential backoff (15 min doubling to 24 h) and skipped until their retry time, so one broken feed can't slow every refresh.
+- **Embedding-Model Guard**: The model ID and vector dimension are recorded with the cache. If you switch models, a dimension mismatch is detected and surfaced (instead of silently degrading search) and `reembed_all` rebuilds the index.
+- **Diversified, Recency-Aware Ranking**: Results blend semantic similarity with a gentle recency boost and pass through MMR (Maximal Marginal Relevance) so syndicated near-duplicate headlines don't crowd out distinct results. Snippets are windowed around the matching query terms.
 - **Auto-HTML Scraper (Cheerio)**: If a URL doesn't have an RSS feed (like a standard news webpage), the plugin automatically scrapes the page for article links using configurable keywords (`news`, `article`, `post`, ...).
 - **Smart Throttling**: Fetches standard RSS feeds instantly and concurrently, but uses a 1.5–3 second randomized delay when scraping HTML pages to bypass 403 Forbidden firewalls and look like a human user.
 - **RSS/Atom XML via fast-xml-parser**: Robust parsing of RSS 2.0 and Atom feeds, with a regex-based fallback parser for malformed XML.
@@ -16,6 +19,8 @@ Instead of searching the web, your LLM can instantly query your local cache of r
 - **Configurable Retention**: Keeps entries by publish date (falling back to cache date) for 30, 60, 90, or 365 days.
 - **Startup Model Check**: Warns (non-fatally) if your configured embedding model isn't loaded, so you know why search drops to keyword-only.
 - **Native SQLite Database**: Uses Node.js's built-in `node:sqlite` module (WAL mode). No C++ addons or Visual Studio build tools required!
+- **Resilient Indexing**: Articles and their chunks are embedded first and committed in a single transaction, so an interrupted or failed refresh never leaves half-indexed entries behind. Store-time L2 norms keep semantic search fast.
+- **Automatic Maintenance**: After each refresh the retention pass runs `PRAGMA optimize` and `VACUUM`s the database only when enough free pages have accumulated (so routine refreshes stay fast).
 - **Safe Data Storage**: Stores your `feeds.txt` and `cache.db` in `~/.lmstudio/plugin-data/rss-rag-cache/` so they survive plugin updates.
 
 📋 Requirements
@@ -50,44 +55,76 @@ https://example.com/news
 
 **2. Plugin Settings UI**
 
-You can adjust these values in the LM Studio plugin settings panel:
+Cache and indexing settings are **global** (they configure the shared on-disk
+cache). Only `topK` is **per-chat**, since it governs how much context a single
+conversation pulls in.
+
+*Global plugin settings:*
 
 | Setting | Default | Description |
 |---|---|---|
 | `retentionDays` | 90 | How long to keep articles (30, 60, 90, or 365 days). |
 | `refreshIntervalHours` | 6 | How often the plugin automatically fetches new RSS items in the background. |
 | `embeddingModel` | `nomic-embed-text-v1.5` | The exact model ID loaded in your LM Studio server. |
-| `topK` | 8 | How many unique articles to return per search. |
 | `chunkSize` | 800 | Length (in characters) of each text chunk used for embedding and search. |
 | `embedBatchSize` | 16 | How many chunks are sent to the embedding model per request (higher = faster but more VRAM). |
 | `maxConcurrentFeeds` | 8 | How many RSS/Atom feeds are fetched at the same time. |
+| `semanticScanLimit` | 50000 | Maximum chunks scanned per semantic search (higher = better recall, slower). |
 | `htmlLinkPatterns` | `news,article,post,blog,stories,press` | Comma-separated URL keywords used when scraping non-RSS pages. |
 | `scrapeFullText` | Off | For HTML-scraped pages, also download each article's full body text (slower refresh, richer content). |
 | `retentionBasis` | `publish_date` | Whether old entries are removed by publish date or cache date. |
 | `refreshOnStartup` | On | Automatically fetch feeds when the plugin loads. |
+| `lmStudioBaseUrl` | `http://localhost:1234` | Where the embedding model is served. |
+
+*Per-chat settings:*
+
+| Setting | Default | Description |
+|---|---|---|
+| `topK` | 8 | How many unique articles to return per search. |
 
 🛠️ LM Studio Tools
 
 The plugin exposes these tools to the LLM:
 
-- **`refresh_rss_feeds`** — Force-refreshes all feeds listed in `feeds.txt`, indexes new items, generates embeddings, and applies the retention policy. Returns a report of successes, failures, and added articles.
-- **`search_rss_cache`** — Hybrid (keyword + semantic) search, optionally filtered by `days`, `feed` (URL substring), or `author`.
-- **`list_rss_feeds`** — Lists all configured feed URLs plus cache stats: entry/chunk counts, missing embeddings, DB size, and last refresh report.
+- **`refresh_rss_feeds`** — Refreshes all feeds listed in `feeds.txt`, indexes new items, generates embeddings, and applies the retention policy. Feeds are fetched conditionally (ETag / Last-Modified) and failing feeds back off; pass `force: true` to re-download everything and ignore backoff. Returns a report of successes, not-modified, skipped, and failed feeds.
+- **`search_rss_cache`** — Hybrid (keyword + semantic) search, optionally filtered by `days`, `feed` (URL substring), or `author`. Results are recency-weighted and diversified.
+- **`list_rss_feeds`** — Lists all configured feed URLs plus cache stats: entry/chunk counts, missing embeddings, DB size, the embedding model/dimension the cache was built with, per-feed health (last status, failure count, next retry), and the last refresh report.
 - **`get_recent_cache_articles`** — Returns the most recent cached articles. Use this to see what news is available without guessing keywords.
 - **`add_rss_feed`** — Adds an RSS/Atom feed URL or webpage URL to `feeds.txt`.
 - **`remove_rss_feed`** — Removes a feed URL from `feeds.txt` (cached articles kept until pruned).
 - **`test_feed`** — Checks whether a URL is a working RSS/Atom feed or scrapeable HTML page, and how many items it exposes.
 - **`prune_removed_feeds`** — Deletes cached articles whose source feed is no longer in `feeds.txt`.
-- **`reindex_missing_embeddings`** — Re-embeds chunks stored as text-only while the embedding model was offline.
+- **`reindex_missing_embeddings`** — Re-embeds chunks stored as text-only while the embedding model was offline, and re-chunks any entries that ended up with no chunks.
+- **`reembed_all`** — Rebuilds the entire vector index with the currently configured embedding model. Use after switching embedding models (or when a dimension-mismatch warning appears). Optional `rechunk: true` also re-chunks with the current `chunkSize`.
+- **`optimize_rss_cache`** — Runs a WAL checkpoint, `VACUUM`, and `ANALYZE` to reclaim disk space (e.g. after retention deletes) and refresh query statistics. A lighter version of this (`PRAGMA optimize`, and `VACUUM` when enough free pages accumulate) now runs automatically after each refresh.
+
+🧪 Development
+
+```bash
+npm install
+npm test          # node:test suite (lib modules + a fake embedding server)
+npm run typecheck # tsc --noEmit over src/*.ts
+```
+
+Contributor notes:
+
+- Do **not** add `"type": "module"` to `package.json`. LM Studio bundles the
+  plugin to a CommonJS `.lmstudio/dev.js`; marking the package as ESM would make
+  Node load that bundle as ESM and break its `require()` calls.
+- Tests rely on Node's automatic module-syntax detection for the ESM `lib/*.js`
+  files (Node 22.7+).
+- Set `RSS_RAG_DATA_DIR` to relocate the data directory. The test suite uses it
+  to run against a throwaway SQLite database.
 
 🧠 How It Works
 
 1. **Fetch & Parse**: The plugin pulls XML data from your URLs, parsing RSS 2.0 and Atom via `fast-xml-parser` (with a legacy regex fallback). If a URL returns HTML, it uses Cheerio to scrape the page for article links.
-2. **Throttling & Retries**: RSS feeds are fetched concurrently (up to `maxConcurrentFeeds`). HTML pages are fetched one-by-one with a 1.5–3 second delay to avoid anti-bot firewalls. Requests retry with backoff on 429/403/5xx.
+2. **Throttling, Conditional GET & Backoff**: RSS feeds are fetched concurrently (up to `maxConcurrentFeeds`) with `If-None-Match` / `If-Modified-Since`, so unchanged feeds return `304` and send no body. HTML pages are fetched one-by-one with a 1.5–3 second delay to avoid anti-bot firewalls. Requests retry with backoff on 429/403/5xx, and a feed that keeps failing enters exponential backoff so it is skipped until its retry time.
 3. **Chunking**: Article content is split into ~800-character overlapping chunks to fit context windows.
 4. **Embedding**: Chunks are sent to LM Studio's `/v1/embeddings` endpoint in batches. If the model is offline, chunks are stored text-only and `reindex_missing_embeddings` completes them later.
 5. **Storage**: Text, metadata, and vector embeddings (stored as BLOBs) are saved in a WAL-mode SQLite file (`cache.db`). Newer items list first; retention purges by publish or cache date.
-6. **Retrieval**: When the LLM searches, the plugin finds the best-matching chunks using trigram FTS5 (exact/near keywords) plus a bounded cosine-similarity scan, deduplicates by article, applies any filters, and returns the top-K articles as context.
+6. **Retrieval**: When the LLM searches, the plugin finds the best-matching chunks using trigram FTS5 (exact/near keywords) plus a bounded cosine-similarity scan, deduplicates by article, applies any filters, blends in a gentle recency boost, and diversifies with MMR before returning the top-K articles. Each result includes a snippet windowed around the matching query terms.
+7. **Health & Maintenance**: Per-feed HTTP validators and failure state live in a `feeds_state` table; the retention pass keeps planner statistics fresh and vacuums only when warranted.
 
 🐛 Troubleshooting
 
@@ -99,3 +136,22 @@ Some websites block automated requests. The plugin uses a Chrome User-Agent, thr
 
 **HTTP 429 Too Many Requests**
 Sites like Reddit aggressively block Node.js fetch requests. If this happens, use an RSS Bridge URL (e.g., `https://rss-bridge.org/bridge01/?action=display&bridge=RedditBridge&format=Atom`) instead of the native `.rss` link.
+
+**I changed the embedding model and search got worse**
+Vectors from different models aren't comparable. The plugin logs a dimension-mismatch / model-change warning and `list_rss_feeds` shows the model and dimension the cache was built with. Run `reembed_all` (with the new model loaded) to rebuild the index.
+
+**A feed keeps failing**
+Repeated failures trigger exponential backoff (15 min → 24 h); `list_rss_feeds` shows each feed's failure count and next retry time. Fix the URL, or run `refresh_rss_feeds` with `force: true` to retry immediately.
+
+📦 Changelog
+
+**1.1.0**
+- Conditional HTTP fetching (`If-None-Match` / `If-Modified-Since`) with per-feed exponential backoff, backed by a new `feeds_state` table.
+- Embedding model/dimension tracking: mismatches are detected and warned about instead of silently degrading search; new `reembed_all` tool rebuilds the index after a model change.
+- Retrieval quality: gentle recency blending, MMR diversity, and snippets windowed around the matching query terms.
+- Automatic maintenance after each refresh (`PRAGMA optimize`, plus `VACUUM` only when enough free pages accumulate).
+- `refresh_rss_feeds` accepts a `force` flag; `list_rss_feeds` reports per-feed health and the model/dimension the cache was built with.
+- Expanded the test suite (conditional GET/304/backoff, `reembedAll`, ranking) and added a `npm run typecheck` script.
+
+**1.0.0**
+- Initial public release.

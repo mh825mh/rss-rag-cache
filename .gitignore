@@ -1,3 +1,8 @@
 node_modules/
 *.log
 .DS_Store
+# CocoIndex Code (ccc)
+/.cocoindex_code/
+# LM Studio build output (regenerated on plugin reload/build)
+.lmstudio/dev.js
+dist/

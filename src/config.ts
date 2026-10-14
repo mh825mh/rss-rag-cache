@@ -1,6 +1,25 @@
 import { createConfigSchematics } from "@lmstudio/sdk";
 
+// Per-chat settings: only knobs that legitimately vary per conversation.
 export const configSchematics = createConfigSchematics()
+  .field(
+    "topK",
+    "numeric",
+    {
+      displayName: "Search Results (Top K)",
+      subtitle: "How many unique articles to return per search.",
+      min: 1,
+      max: 50,
+      int: true,
+      slider: { step: 1, min: 1, max: 20 },
+    },
+    8,
+  )
+  .build();
+
+// Global settings: they configure the shared cache/index, so they apply to the
+// plugin as a whole rather than to a single chat.
+export const globalConfigSchematics = createConfigSchematics()
   .field(
     "retentionDays",
     "select",
@@ -45,19 +64,6 @@ export const configSchematics = createConfigSchematics()
     "nomic-embed-text-v1.5",
   )
   .field(
-    "topK",
-    "numeric",
-    {
-      displayName: "Search Results (Top K)",
-      subtitle: "How many unique articles to return per search.",
-      min: 1,
-      max: 50,
-      int: true,
-      slider: { step: 1, min: 1, max: 20 },
-    },
-    8,
-  )
-  .field(
     "chunkSize",
     "numeric",
     {
@@ -95,6 +101,19 @@ export const configSchematics = createConfigSchematics()
       slider: { step: 1, min: 1, max: 16 },
     },
     8,
+  )
+  .field(
+    "semanticScanLimit",
+    "numeric",
+    {
+      displayName: "Semantic Scan Limit",
+      subtitle: "Maximum chunks scanned per semantic search. Higher = better recall, slower searches.",
+      min: 1000,
+      max: 1000000,
+      int: true,
+      slider: { step: 1000, min: 1000, max: 200000 },
+    },
+    50000,
   )
   .field(
     "htmlLinkPatterns",
@@ -136,5 +155,15 @@ export const configSchematics = createConfigSchematics()
       subtitle: "Automatically fetch feeds when the plugin loads.",
     },
     true,
+  )
+  .field(
+    "lmStudioBaseUrl",
+    "string",
+    {
+      displayName: "LM Studio Base URL",
+      subtitle: "Where the embedding model is served.",
+      placeholder: "http://localhost:1234",
+    },
+    "http://localhost:1234",
   )
   .build();
