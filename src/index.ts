@@ -11,7 +11,7 @@ const originalEmitWarning = process.emitWarning.bind(process);
 import { PluginContext } from "@lmstudio/sdk";
 import { configSchematics, globalConfigSchematics } from "./config";
 import { toolsProvider } from "./toolsProvider";
-import { getSettings, loadEnabledFeeds, ensureFeedsFile } from "../lib/config.js";
+import { getSettings, loadEnabledFeeds, loadFeedConfig, ensureFeedsFile } from "../lib/config.js";
 import { getDb, setMeta } from "../lib/db.js";
 import { runRetention, getLastRefresh } from "../lib/retention.js";
 import { refreshFeedsShared, isRefreshing, backfillEmbeddings } from "../lib/retriever.js";
@@ -70,7 +70,7 @@ export async function main(context: PluginContext): Promise<void> {
     try {
       const feeds = loadEnabledFeeds(s);
       const res = await refreshFeedsShared(s, feeds);
-      const ret = runRetention(s.retentionDays, s.retentionBasis || "publish_date");
+      const ret = runRetention(s.retentionDays, s.retentionBasis || "publish_date", loadFeedConfig(s));
       let backfill: any = null;
       try {
         backfill = await backfillEmbeddings(s, { batchSize: 500, maxBatches: 8 });

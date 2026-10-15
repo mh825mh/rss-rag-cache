@@ -1,0 +1,145 @@
+{
+  "referenceDate": 1767225600000,
+  "entries": [
+    {
+      "guid": "coral-reef",
+      "title": "Coral Reef Restoration Progress",
+      "link": "https://eval/coral-reef",
+      "feed_url": "https://eval/feed/ocean",
+      "collection": "science",
+      "pub_date": 1767225600000,
+      "content": "Coral reef restoration projects are racing to halt bleaching driven by warming oceans. Marine biodiversity surveys across the Great Barrier Reef show that transplanted coral fragments can recover within a few years when water quality improves. Researchers emphasise biodiversity monitoring and local protection."
+    },
+    {
+      "guid": "deep-sea",
+      "title": "Deep Sea Exploration Missions",
+      "link": "https://eval/deep-sea",
+      "feed_url": "https://eval/feed/ocean",
+      "collection": "science",
+      "pub_date": 1767139200000,
+      "content": "Deep sea exploration relies on remotely operated vehicles to map the abyssal zone. Hydrothermal vents host chemosynthetic ecosystems, and new species are described on every expedition. Pressure and darkness make deep sea sampling expensive but scientifically rewarding."
+    },
+    {
+      "guid": "stock-market",
+      "title": "Quarterly Market Wrap",
+      "link": "https://eval/stock-market",
+      "feed_url": "https://eval/feed/business",
+      "collection": "business",
+      "pub_date": 1767052800000,
+      "content": "Quarterly market wrap: equity indices rose as strong earnings and improving investor sentiment offset rate concerns. Analysts note that earnings guidance matters more than headline revenue, and volatility remains elevated across sectors."
+    },
+    {
+      "guid": "startup-funding",
+      "title": "Startup Funding Round Trends",
+      "link": "https://eval/startup-funding",
+      "feed_url": "https://eval/feed/business",
+      "collection": "business",
+      "pub_date": 1766966400000,
+      "content": "Startup funding cooled this quarter as venture capital firms favoured profitability over growth. Seed round valuations compressed, and later stage rounds took longer to close. Founders are extending runways and cutting burn."
+    },
+    {
+      "guid": "quantum",
+      "title": "Quantum Computing Milestone",
+      "link": "https://eval/quantum",
+      "feed_url": "https://eval/feed/tech",
+      "collection": "tech",
+      "pub_date": 1766880000000,
+      "content": "A quantum computing milestone: researchers demonstrated logical qubits with improved entanglement and error correction. Scaling error correction remains the central challenge before quantum advantage in chemistry and optimisation."
+    },
+    {
+      "guid": "ai-models",
+      "title": "Open Weights AI Models Advance",
+      "link": "https://eval/ai-models",
+      "feed_url": "https://eval/feed/tech",
+      "collection": "tech",
+      "pub_date": 1766793600000,
+      "content": "Open weights AI models are narrowing the gap with closed systems. Fine tuning transformer language models on domain data is now routine, and smaller models handle many tasks well after distillation and quantisation."
+    },
+    {
+      "guid": "solar",
+      "title": "Solar Power Efficiency Records",
+      "link": "https://eval/solar",
+      "feed_url": "https://eval/feed/energy",
+      "collection": "energy",
+      "pub_date": 1766707200000,
+      "content": "Solar power efficiency improved again as perovskite tandem cells passed laboratory records. Photovoltaics now make up a growing share of grid capacity, though storage and transmission remain bottlenecks for round the clock supply."
+    },
+    {
+      "guid": "battery",
+      "title": "Battery Storage Breakthrough",
+      "link": "https://eval/battery",
+      "feed_url": "https://eval/feed/energy",
+      "collection": "energy",
+      "pub_date": 1766620800000,
+      "content": "A battery storage breakthrough: solid state lithium cells promise higher energy density and faster charging. Manufacturers are piloting production lines, but cost and cycle life still need to be proven at scale."
+    },
+    {
+      "guid": "hiking-gear",
+      "title": "Alpine Hiking Gear Review",
+      "link": "https://eval/hiking-gear",
+      "feed_url": "https://eval/feed/outdoors",
+      "collection": "outdoors",
+      "pub_date": 1766534400000,
+      "content": "Alpine hiking gear review: we tested ropes, harnesses, crampons and helmets on steep snow. Durable crampons and a well fitted harness matter more than brand, and layering beats bulk in cold wind on exposed ridges."
+    },
+    {
+      "guid": "marathon",
+      "title": "Marathon Training Plan Guide",
+      "link": "https://eval/marathon",
+      "feed_url": "https://eval/feed/outdoors",
+      "collection": "outdoors",
+      "pub_date": 1766448000000,
+      "content": "A marathon training plan balances easy miles, intervals and long runs. Endurance builds through consistent weekly volume, and recovery days prevent injury. Tapering before race day preserves speed and freshness."
+    },
+    {
+      "guid": "coffee",
+      "title": "Single Origin Coffee Guide",
+      "link": "https://eval/coffee",
+      "feed_url": "https://eval/feed/food",
+      "collection": "food",
+      "pub_date": 1766361600000,
+      "content": "A single origin coffee guide: arabica beans from high altitude farms taste fruitier, while darker roasting masks defects. Espresso extraction depends on grind, dose and water temperature. Freshly roasted arabica beans matter most."
+    },
+    {
+      "guid": "wine",
+      "title": "Natural Wine Explained",
+      "link": "https://eval/wine",
+      "feed_url": "https://eval/feed/food",
+      "collection": "food",
+      "pub_date": 1766275200000,
+      "content": "Natural wine explained: low intervention vineyards rely on native yeast fermentation. Tannins and acidity shape structure, and sulfite levels vary widely between producers. Fermentation temperature changes aromatics in the final bottle."
+    },
+    {
+      "guid": "telescope",
+      "title": "James Webb Discoveries",
+      "link": "https://eval/telescope",
+      "feed_url": "https://eval/feed/space",
+      "collection": "science",
+      "pub_date": 1766188800000,
+      "content": "James Webb discoveries continue: spectroscopy of exoplanet atmospheres and distant galaxies reshapes cosmology. The space telescope observes infrared light beyond the reach of ground observatories and maps galaxy formation."
+    },
+    {
+      "guid": "wildfire",
+      "title": "Wildfire Season Outlook",
+      "link": "https://eval/wildfire",
+      "feed_url": "https://eval/feed/climate",
+      "collection": "climate",
+      "pub_date": 1766102400000,
+      "content": "Wildfire season outlook warns of severe drought and fast moving fires. Firefighting crews prioritise evacuations and defensible space, while smoke harms air quality far downwind and disrupts schools and businesses."
+    }
+  ],
+  "queries": [
+    { "query": "coral reef bleaching biodiversity", "relevant": ["coral-reef"] },
+    { "query": "hydrothermal vents abyssal exploration", "relevant": ["deep-sea"] },
+    { "query": "quarterly earnings investor sentiment", "relevant": ["stock-market"] },
+    { "query": "venture capital seed round valuation", "relevant": ["startup-funding"] },
+    { "query": "qubits entanglement error correction", "relevant": ["quantum"] },
+    { "query": "fine tuning transformer language models", "relevant": ["ai-models"] },
+    { "query": "solar power and battery energy storage", "relevant": ["solar", "battery"] },
+    { "query": "crampons harnesses alpine climbing", "relevant": ["hiking-gear"] },
+    { "query": "endurance running training intervals", "relevant": ["marathon"] },
+    { "query": "coffee and wine fermentation", "relevant": ["coffee", "wine"] },
+    { "query": "exoplanets spectroscopy galaxies telescope", "relevant": ["telescope"] },
+    { "query": "wildfire drought evacuations", "relevant": ["wildfire"] }
+  ]
+}

@@ -7,7 +7,7 @@ import { configSchematics, globalConfigSchematics } from "./config";
 import { runRetention, pruneRemovedFeeds, getLastRefresh } from "../lib/retention.js";
 import { refreshFeedsShared, retrieve, reindexMissing, reembedAll, backfillEmbeddings } from "../lib/retriever.js";
 import { getDiagnostics } from "../lib/diagnostics.js";
-import { testFeed } from "../lib/fetcher.js";
+import { testFeed, discoverFeed } from "../lib/fetcher.js";
 
 function isoDate(ts: number) {
   return Number.isFinite(ts) ? new Date(ts).toISOString() : new Date(Date.now()).toISOString();
@@ -28,6 +28,8 @@ function settingsFromController(ctl: ToolsProviderController) {
       refreshIntervalHours: g.get("refreshIntervalHours"),
       embeddingModel: g.get("embeddingModel"),
       chunkSize: g.get("chunkSize"),
+      contextualChunks: g.get("contextualChunks"),
+      contextChunks: g.get("contextChunks"),
       embedBatchSize: g.get("embedBatchSize"),
       embedConcurrency: g.get("embedConcurrency"),
       maxConcurrentFeeds: g.get("maxConcurrentFeeds"),
@@ -64,7 +66,7 @@ function getStats() {
 async function refreshAll(s: ReturnType<typeof getSettings>, force = true) {
   const feeds = loadEnabledFeeds(s);
   const res = await refreshFeedsShared(s, feeds, { force });
-  const ret = runRetention(s.retentionDays, s.retentionBasis || "publish_date");
+  const ret = runRetention(s.retentionDays, s.retentionBasis || "publish_date", loadFeedConfig(s));
 
   // Self-heal any embedding gaps left by a model that was offline mid-index.
   let backfill: any = null;
@@ -106,7 +108,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
   return [
     tool({
       name: "search_rss_cache",
-      description: "Semantic + keyword hybrid search over the local RSS RAG cache. Filter by recency (days or after/before), feed (URL substring), author, or tag. Sort by relevance (default) or date, and paginate with limit/offset.",
+      description: "Semantic + keyword hybrid search over the local RSS RAG cache. Filter by recency (days or after/before), feed (URL substring), author, tag, or collection. Sort by relevance (default) or date, and paginate with limit/offset.",
       parameters: {
         query: z.string(),
         days: z.number().optional(),
@@ -115,16 +117,18 @@ export async function toolsProvider(ctl: ToolsProviderController) {
         feed: z.string().optional(),
         author: z.string().optional(),
         tag: z.string().optional(),
+        collection: z.string().optional(),
         sort: z.enum(["relevance", "date"]).optional(),
         limit: z.number().optional(),
         offset: z.number().optional(),
       },
-      implementation: async ({ query, days, after, before, feed, author, tag, sort, limit, offset }: {
+      implementation: async ({ query, days, after, before, feed, author, tag, collection, sort, limit, offset }: {
         query: string; days?: number; after?: string; before?: string; feed?: string; author?: string;
-        tag?: string; sort?: "relevance" | "date"; limit?: number; offset?: number;
+        tag?: string; collection?: string; sort?: "relevance" | "date"; limit?: number; offset?: number;
       }) => {
         const s = getSettings();
-        const results = await retrieve(query, s, { days, after, before, feed, author, tag, sort, limit, offset });
+        const results = await retrieve(query, s, { days, after, before, feed, author, tag, collection, sort, limit, offset });
+
 
         if (!results.length) return { count: 0, results: [], note: "No matches." };
 
@@ -218,12 +222,25 @@ export async function toolsProvider(ctl: ToolsProviderController) {
     }),
     tool({
       name: "add_rss_feed",
-      description: "Add an RSS/Atom feed URL or plain webpage URL to feeds.txt.",
+      description: "Add an RSS/Atom feed URL or plain webpage URL to feeds.txt. If `url` is a homepage, it tries to auto-discover an alternate RSS/Atom feed and adds the discovered feed instead (returning `discoveredFeedUrl`).",
       parameters: {
         url: z.string()
       },
       implementation: async ({ url }: { url: string }) => {
         const s = getSettings();
+        // If the URL does not look like a feed, try to discover an alternate.
+        const looksLikeFeed = /\.(xml|rss|atom)(\?|$)/i.test(url) || /\/(rss|feed|feeds)(\/|$|\?)/i.test(url);
+        if (!looksLikeFeed) {
+          try {
+            const found = await discoverFeed(url);
+            if (found.found && found.feedUrl && found.feedUrl !== url) {
+              const added = appendFeed(found.feedUrl, s);
+              return { ...added, requestedUrl: url, discoveredFeedUrl: found.feedUrl, type: found.type, candidates: found.candidates };
+            }
+          } catch {
+            /* fall through */
+          }
+        }
         return appendFeed(url, s);
       }
     }),
@@ -303,7 +320,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
     }),
     tool({
       name: "set_feed_options",
-      description: "Set per-feed options (stored in feeds.json): enabled, tags, scrapeFullText, linkPatterns, maxItems, headers. Only the supplied fields change. Use tags later as a search filter.",
+      description: "Set per-feed options (stored in feeds.json): enabled, tags, scrapeFullText, linkPatterns, maxItems, headers, retentionDays, collection. Only the supplied fields change. Use tags/collection later as search filters.",
       parameters: {
         url: z.string(),
         enabled: z.boolean().optional(),
@@ -312,10 +329,13 @@ export async function toolsProvider(ctl: ToolsProviderController) {
         linkPatterns: z.string().optional(),
         maxItems: z.number().optional(),
         headers: z.record(z.string()).optional(),
+        retentionDays: z.number().optional(),
+        collection: z.string().optional(),
       },
       implementation: async (args: {
         url: string; enabled?: boolean; tags?: string[]; scrapeFullText?: boolean;
         linkPatterns?: string; maxItems?: number; headers?: Record<string, string>;
+        retentionDays?: number; collection?: string;
       }) => {
         const s = getSettings();
         const { url, ...options } = args;
@@ -326,8 +346,47 @@ export async function toolsProvider(ctl: ToolsProviderController) {
       }
     }),
     tool({
+      name: "search_rss_cache_debug",
+      description: "Debug version of search_rss_cache: returns ranking details for each result (per-list ranks, RRF contribution, cosine similarity, fused combined score). Use with debug options.",
+      parameters: {
+        query: z.string(),
+        days: z.number().optional(),
+        after: z.string().optional(),
+        before: z.string().optional(),
+        feed: z.string().optional(),
+        author: z.string().optional(),
+        tag: z.string().optional(),
+        collection: z.string().optional(),
+        sort: z.enum(["relevance", "date"]).optional(),
+        limit: z.number().optional(),
+        offset: z.number().optional(),
+      },
+      implementation: async ({ query, days, after, before, feed, author, tag, collection, sort, limit, offset }: {
+        query: string; days?: number; after?: string; before?: string; feed?: string; author?: string;
+        tag?: string; collection?: string; sort?: "relevance" | "date"; limit?: number; offset?: number;
+      }) => {
+        const s = getSettings();
+        const results = await retrieve(query, s, { days, after, before, feed, author, tag, collection, sort, limit, offset, debug: true });
+        return {
+          count: results.length,
+          results: results.map((r: any) => ({
+            title: r.title,
+            link: r.link,
+            feed: r.feed,
+            author: r.author,
+            date: r.pub_date_iso,
+            tags: r.tags,
+            score: typeof r.score === "number" ? Number(r.score.toFixed(3)) : undefined,
+            similarity: typeof r.similarity === "number" ? Number(r.similarity.toFixed(3)) : undefined,
+            debug: r._debug || null,
+            snippet: (r.text || "").slice(0, 600),
+          })),
+        };
+      }
+    }),
+    tool({
       name: "cache_diagnostics",
-      description: "Report cache health: entry/chunk counts, embedding coverage and gaps, DB/WAL size, feed backoff state, embedding model/dimension, schema version, and suggested actions.",
+      description: "Report cache health: entry/chunk counts, embedding coverage and gaps (including contextual-embedding upgrade progress), DB/WAL size, resident vector-index stats, feed backoff state, embedding model/dimension, schema version, and suggested actions.",
       parameters: {},
       implementation: async () => {
         return getDiagnostics(getSettings());

@@ -77,6 +77,28 @@ export const globalConfigSchematics = createConfigSchematics()
     800,
   )
   .field(
+    "contextualChunks",
+    "boolean",
+    {
+      displayName: "Contextual Chunk Embeddings",
+      subtitle: "Prefix each chunk with its article title before embedding. Improves recall on summary-only feeds; changing it re-embeds the cache.",
+    },
+    true,
+  )
+  .field(
+    "contextChunks",
+    "numeric",
+    {
+      displayName: "Neighbouring Chunks (Context)",
+      subtitle: "How many adjacent chunks to include around each search hit, for extra context (0–2).",
+      min: 0,
+      max: 2,
+      int: true,
+      slider: { step: 1, min: 0, max: 2 },
+    },
+    1,
+  )
+  .field(
     "embedBatchSize",
     "numeric",
     {

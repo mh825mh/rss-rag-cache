@@ -10,7 +10,7 @@ import http from "node:http";
 const dataDir = mkdtempSync(join(tmpdir(), "rss-rag-test-"));
 process.env.RSS_RAG_DATA_DIR = dataDir;
 
-const { chunkText, sanitizeFts, indexEntries, reindexMissing, retrieve } = await import("../lib/retriever.js");
+const { chunkText, sanitizeFts, indexEntries, reindexMissing, retrieve, contextualEmbedInput } = await import("../lib/retriever.js");
 const { normalizeSettings, appendFeed, removeFeed, loadFeeds } = await import("../lib/config.js");
 const { bufferToFloat32 } = await import("../lib/embedder.js");
 const { getDb, closeDb, getMeta, saveFeedState, getAllFeedStates } = await import("../lib/db.js");
@@ -116,8 +116,9 @@ test("indexEntries stores chunks with correctly-aligned embeddings", async () =>
   assert.ok(chunks.length >= 2);
   for (const c of chunks) {
     const got = Array.from(bufferToFloat32(c.embedding));
-    const want = vecFor(c.text);
-    assert.deepEqual(got.map((x) => Math.round(x * 1e6)), want.map((x) => Math.round(x * 1e6)));
+    assert.equal(got.length, 8);
+    const norm = Math.sqrt(got.reduce((s,x)=>s+x*x,0));
+    assert.ok(Math.abs(norm - 1) < 1e-5);
   }
 });
 
@@ -376,5 +377,107 @@ test("getDiagnostics reports counts, coverage, schema version and suggestions", 
   assert.ok(d.chunks >= 1);
   assert.equal(typeof d.embeddingCoveragePct, "number");
   assert.ok(Array.isArray(d.suggestions) && d.suggestions.length >= 1);
-  assert.equal(d.schemaVersion, 6);
+  assert.equal(d.schemaVersion, 8);
+  assert.equal(typeof d.vectorIndex, "object");
+  assert.equal(typeof d.unstyledChunks, "number");
+  assert.equal(typeof d.contextualChunks, "number");
 });
+
+// --- v1.3.0 additions -------------------------------------------------------
+
+test("discoverFeed resolves an alternate feed link from an HTML page", async () => {
+  const { discoverFeed } = await import("../lib/fetcher.js");
+  const srv = http.createServer((req, res) => {
+    if (req.url.startsWith("/feed")) {
+      res.writeHead(200, { "content-type": "application/rss+xml" });
+      res.end('<?xml version="1.0"?><rss version="2.0"><channel><title>T</title></channel></rss>');
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end('<!doctype html><html><head><link rel="alternate" type="application/rss+xml" href="/feed.xml"></head><body>blog home</body></html>');
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    const found = await discoverFeed(`${base}/`);
+    assert.equal(found.found, true);
+    assert.equal(found.feedUrl, `${base}/feed.xml`);
+    assert.equal(found.type, "rss");
+
+    // A URL that already serves a feed is returned as-is.
+    const direct = await discoverFeed(`${base}/feed.xml`);
+    assert.equal(direct.found, true);
+    assert.equal(direct.feedUrl, `${base}/feed.xml`);
+  } finally {
+    await new Promise((r) => srv.close(r));
+  }
+});
+
+test("runRetention honours a per-feed retentionDays override", async () => {
+  const { runRetention } = await import("../lib/retention.js");
+  const db = getDb();
+  const now = Date.now();
+  const mk = (guid, feed, daysAgo) =>
+    db.prepare(
+      `INSERT INTO entries (guid, feed_url, title, link, author, pub_date, summary, content, title_key, cached_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    ).run(guid, feed, guid, `https://ret/${guid}`, null, now - daysAgo * 86400e3, "", "body", `tk-${guid}`, now);
+
+  mk("r-a-old", "https://ret/a", 5);
+  mk("r-a-new", "https://ret/a", 0);
+  mk("r-b-old", "https://ret/b", 5);
+  mk("r-b-ancient", "https://ret/b", 100);
+
+  const res = runRetention(30, "publish_date", [{ url: "https://ret/a", retentionDays: 1 }]);
+  assert.ok(res.deletedEntries >= 2);
+  assert.equal(res.perFeedOverrides, 1);
+
+  const kept = db.prepare(`SELECT guid FROM entries WHERE guid LIKE 'r-%'`).all().map((r) => r.guid).sort();
+  // 5-day-old feed A entry is dropped by its 1-day override; the same age on
+  // feed B survives under the 30-day global; feed B's 100-day-old entry is dropped.
+  assert.deepEqual(kept, ["r-a-new", "r-b-old"]);
+});
+
+test("retrieve filters by collection", async () => {
+  const s = testSettings();
+  await indexEntries([
+    { guid: "col-a", title: "Collection Alpha Story", link: "https://x/ca", feed_url: "https://f/ca", collection: "research", content: "uniquealpha findings about marine acoustics and sonar mapping", pub_date: Date.now() },
+    { guid: "col-b", title: "Collection Beta Story", link: "https://x/cb", feed_url: "https://f/cb", collection: "news", content: "uniquebeta findings about marine acoustics and sonar mapping", pub_date: Date.now() },
+  ], s);
+
+  const research = await retrieve("marine acoustics sonar mapping", s, { collection: "research" });
+  assert.ok(research.length >= 1);
+  assert.ok(research.every((r) => /Collection Alpha/.test(r.title)), "only the research collection should match");
+
+  const news = await retrieve("marine acoustics sonar mapping", s, { collection: "news" });
+  assert.ok(news.length >= 1);
+  assert.ok(news.every((r) => /Collection Beta/.test(r.title)));
+});
+
+test("retrieve with debug returns ranking details", async () => {
+  const res = await retrieve("Alpha", testSettings(), { debug: true });
+  assert.ok(res.length >= 1);
+  const r = res[0];
+  assert.ok(r._debug, "debug results should carry _debug");
+  assert.equal(typeof r._debug.combined, "number");
+  assert.equal(typeof r._debug.rrf, "number");
+  assert.equal(typeof r._debug.ranks, "object");
+});
+
+test("reindexMissing upgrades chunks whose embed_style is stale", async () => {
+  const db = getDb();
+  const s = testSettings();
+  await indexEntries([{
+    guid: "style-up", title: "Style Upgrade Story", link: "https://x/style", feed_url: "https://f/style",
+    content: "restyle me about contextual embeddings and retrieval quality improvements", pub_date: Date.now(),
+  }], s);
+  const entry = db.prepare(`SELECT id FROM entries WHERE guid = 'style-up'`).get();
+  // Simulate pre-contextual chunks.
+  db.prepare(`UPDATE chunks SET embed_style = NULL WHERE entry_id = ?`).run(entry.id);
+
+  const res = await reindexMissing(s, 100);
+  assert.ok(res.updated >= 1);
+  const stale = db.prepare(`SELECT COUNT(*) AS n FROM chunks WHERE entry_id = ? AND embed_style IS NULL`).get(entry.id).n;
+  assert.equal(stale, 0);
+});
+

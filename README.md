@@ -7,7 +7,15 @@ Instead of searching the web, your LLM can instantly query your local cache of r
 ✨ Features
 
 - **Local RAG Pipeline**: Fetches RSS feeds, chunks text, and generates embeddings via LM Studio's local server.
-- **Hybrid Search (BM25 + RRF)**: Combines two SQLite FTS5 indexes (trigram for CJK/substrings, and `porter unicode61` for real BM25 word ranking) with a bounded semantic full-scan, fused by Reciprocal Rank Fusion. If the embedding model is offline, it automatically falls back to pure keyword search.
+- **Hybrid Search (BM25 + RRF)**: Combines two SQLite FTS5 indexes (trigram for CJK/substrings, and `porter unicode61` for real BM25 word ranking) with a resident in-memory vector index (falling back to a bounded SQL scan when the matrix would exceed the memory ceiling), fused by Reciprocal Rank Fusion. If the embedding model is offline, it automatically falls back to pure keyword search.
+- **Contextual Chunk Embeddings**: Each chunk is embedded as `title + "\n" + chunk`, so summary-only feeds still produce self-contained vectors. The stored/displayed text is unchanged. Switchable via `contextualChunks`; existing caches are upgraded in the background by `reindex_missing_embeddings`.
+- **Small-to-Big Context**: Each search hit is expanded to include up to `contextChunks` neighbouring chunks, so the returned snippet carries surrounding context rather than an isolated passage.
+- **Fast Vector Index**: All embeddings are loaded once into a single, densely-packed, pre-normalised `Float32Array`, so a semantic query is one tight dot-product loop with zero per-query allocation. The index is invalidated automatically on any write and rebuilds lazily; a configurable byte ceiling (`RSS_RAG_INDEX_MAX_MB`, default 256 MB) falls back to the streaming scan when exceeded.
+- **Feed Auto-Discovery**: `add_rss_feed` accepts a blog homepage and follows `<link rel="alternate" type="application/rss+xml|atom+xml">` to the real feed, adding that instead. `test_feed` reports any discovered alternates.
+- **Per-Feed TTL & Collections**: `feeds.json` supports a per-feed `retentionDays` override and a `collection` label; retention honours the override, and search can be scoped with the `collection` filter.
+- **Ranking Debug Tool**: `search_rss_cache_debug` explains each result (per-list rank, RRF contribution, cosine similarity, fused score) for observability without changing behaviour.
+- **Eval Harness**: `npm run eval` indexes a frozen corpus against a deterministic fake embedding server and reports recall@1/3/5/10, MRR, nDCG@10, and latency p50/p95, gating on regressions versus a committed baseline.
+
 - **Structure-Aware Chunking**: Text is split on paragraph and sentence boundaries (with a small overlap) instead of a fixed character window, so chunks never cut a sentence in half and embeddings represent coherent passages.
 - **Content-Change Re-Indexing**: Each entry stores a content hash; when a feed edits an article (same GUID, new body), the entry's chunks are rebuilt and re-embedded instead of being ignored forever.
 - **Robust Article Extraction**: Reads `<article>` / content selectors, strips boilerplate, preserves paragraph breaks, and falls back to Open Graph / meta descriptions.
@@ -81,8 +89,8 @@ conversation pulls in.
 | `maxConcurrentFeeds` | 8 | How many RSS/Atom feeds are fetched at the same time. |
 | `semanticScanLimit` | 50000 | Maximum chunks scanned per semantic search (higher = better recall, slower). |
 | `htmlLinkPatterns` | `news,article,post,blog,stories,press` | Comma-separated URL keywords used when scraping non-RSS pages. |
-| `scrapeFullText` | Off | For HTML-scraped pages, also download each article's full body text (slower refresh, richer content). |
-| `retentionBasis` | `publish_date` | Whether old entries are removed by publish date or cache date. |
+| `contextualChunks` | On | Prefix each chunk with its article title before embedding (improves recall on summary-only feeds). Changing it re-embeds the cache. |
+| `contextChunks` | 1 | How many adjacent chunks to include around each match (0–2) for extra context. |
 | `refreshOnStartup` | On | Automatically fetch feeds when the plugin loads. |
 | `lmStudioBaseUrl` | `http://localhost:1234` | Where the embedding model is served. |
 
@@ -106,20 +114,21 @@ For fine-grained control, create `feeds.json` next to `feeds.txt` (or use the `s
 }
 ```
 
-Supported fields per feed: `enabled`, `tags`, `scrapeFullText`, `linkPatterns`, `maxItems`, `headers`. Set `enabled: false` to keep a feed configured but skip fetching it, and use `tags` to filter searches with the `tag` parameter.
+Supported fields per feed: `enabled`, `tags`, `scrapeFullText`, `linkPatterns`, `maxItems`, `headers`, `retentionDays`, `collection`. Set `enabled: false` to keep a feed configured but skip fetching it, and use `tags` and `collection` to filter searches.
 
 🛠️ LM Studio Tools
 
 The plugin exposes these tools to the LLM:
 
 - **`refresh_rss_feeds`** — Refreshes all feeds listed in `feeds.txt`, indexes new items, generates embeddings, and applies the retention policy. Feeds are fetched conditionally (ETag / Last-Modified) and failing feeds back off; pass `force: true` to re-download everything and ignore backoff. Returns a report of successes, not-modified, skipped, and failed feeds.
-- **`search_rss_cache`** — Hybrid (BM25 keyword + semantic) search. Filter by `days`, `after`/`before` (ISO date), `feed` (URL substring), `author`, or `tag`; sort by `relevance` (default) or `date`; paginate with `limit`/`offset`. Results are recency-weighted, de-duplicated (SimHash), and diversified (MMR).
+- **`search_rss_cache`** — Hybrid (BM25 keyword + semantic) search. Filter by `days`, `after`/`before` (ISO date), `feed` (URL substring), `author`, `tag`, or `collection`; sort by `relevance` (default) or `date`; paginate with `limit`/`offset`. Results are recency-weighted, de-duplicated (SimHash), and diversified (MMR). Each hit includes expanded context (via `contextChunks`) and a snippet windowed around the matching query terms.
+- **`search_rss_cache_debug`** — Diagnostic version of `search_rss_cache` that returns per-result ranking details (`_debug`) including per-list ranks, RRF contribution, cosine similarity, and the fused combined score. No behaviour change to the non-debug search.
 - **`list_rss_feeds`** — Lists configured feeds (with their tags/enabled state) plus cache stats: entry/chunk counts, missing embeddings, DB size, the embedding model/dimension the cache was built with, per-feed health (last status, failure count, next retry), and the last refresh report.
 - **`get_recent_cache_articles`** — Returns the most recent cached articles. Use this to see what news is available without guessing keywords.
-- **`add_rss_feed`** — Adds an RSS/Atom feed URL or webpage URL to `feeds.txt`.
+- **`add_rss_feed`** — Adds an RSS/Atom feed URL or webpage URL to `feeds.txt`. If a homepage is given, it auto-discovers the alternate feed via `<link rel="alternate">` and adds the discovered feed URL instead (returns `requestedUrl`, `discoveredFeedUrl`, `type`, and any `candidates`).
 - **`remove_rss_feed`** — Removes a feed URL from `feeds.txt` (and any `feeds.json` override). Cached articles are kept until pruned.
-- **`set_feed_options`** — Sets per-feed options in `feeds.json` (`enabled`, `tags`, `scrapeFullText`, `linkPatterns`, `maxItems`, `headers`). Only the supplied fields change.
-- **`test_feed`** — Checks whether a URL is a working RSS/Atom feed or scrapeable HTML page, and how many items it exposes.
+- **`set_feed_options`** — Sets per-feed options in `feeds.json` (`enabled`, `tags`, `scrapeFullText`, `linkPatterns`, `maxItems`, `headers`, `retentionDays`, `collection`). Only the supplied fields change.
+- **`test_feed`** — Checks whether a URL is a working RSS/Atom feed or scrapeable HTML page, and how many items it exposes. When the URL is an HTML page, it also returns a `discovered` object listing any alternate feeds found.
 - **`prune_removed_feeds`** — Deletes cached articles whose source feed is no longer in `feeds.txt`.
 - **`reindex_missing_embeddings`** — Re-embeds chunks stored as text-only while the embedding model was offline, and re-chunks any entries that ended up with no chunks.
 - **`reembed_all`** — Rebuilds the entire vector index with the currently configured embedding model. Use after switching embedding models (or when a dimension-mismatch warning appears). Optional `rechunk: true` also re-chunks with the current `chunkSize`.
@@ -132,6 +141,7 @@ The plugin exposes these tools to the LLM:
 npm install
 npm test          # node:test suite (lib modules + a fake embedding server)
 npm run typecheck # tsc --noEmit over src/*.ts
+npm run eval      # Phase 0 retrieval eval (recall@k/MRR/nDCG@10 + latency)
 ```
 
 Contributor notes:
@@ -172,6 +182,15 @@ Vectors from different models aren't comparable. The plugin logs a dimension-mis
 Repeated failures trigger exponential backoff (15 min → 24 h); `list_rss_feeds` shows each feed's failure count and next retry time. Fix the URL, or run `refresh_rss_feeds` with `force: true` to retry immediately.
 
 📦 Changelog
+
+**1.3.0**
+- Contextual chunk embeddings (prefix title to chunk before embedding) and background upgrade of stale chunks via `reindex_missing_embeddings`.
+- Small-to-big context: each hit expands to neighbouring chunks (configurable via `contextChunks`).
+- In-memory vector index: pre-normalised flat `Float32Array` with lazy rebuilds, zero per-query allocations, and a memory ceiling (`RSS_RAG_INDEX_MAX_MB`) falling back to the streaming SQL scan.
+- Feed auto-discovery: `add_rss_feed` discovers `<link rel="alternate">` feeds from blog homepages; `test_feed` reports discovered alternates.
+- Per-feed TTL overrides and `collection` labels (`feeds.json`), with retention honouring overrides and search supporting a `collection` filter.
+- `search_rss_cache_debug` tool for ranking introspection; `cache_diagnostics` reports vector-index and embed-style coverage.
+- Phase 0 eval harness (`lib/eval.js`, `npm run eval`, frozen corpus, deterministic baseline) for recall@1/3/5/10, MRR, nDCG@10, and latency.
 
 **1.2.0**
 - Hybrid retrieval rewritten around Reciprocal Rank Fusion of a trigram FTS5 list, a new `porter unicode61` BM25 FTS5 list, and a bounded vector scan.
