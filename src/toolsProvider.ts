@@ -8,6 +8,7 @@ import { runRetention, pruneRemovedFeeds, getLastRefresh } from "../lib/retentio
 import { refreshFeedsShared, retrieve, reindexMissing, reembedAll, backfillEmbeddings } from "../lib/retriever.js";
 import { getDiagnostics } from "../lib/diagnostics.js";
 import { testFeed, discoverFeed } from "../lib/fetcher.js";
+import { resolveToolSurface } from "../lib/toolSurface.js";
 
 function isoDate(ts: number) {
   return Number.isFinite(ts) ? new Date(ts).toISOString() : new Date(Date.now()).toISOString();
@@ -39,6 +40,8 @@ function settingsFromController(ctl: ToolsProviderController) {
       retentionBasis: g.get("retentionBasis"),
       refreshOnStartup: g.get("refreshOnStartup"),
       lmStudioBaseUrl: g.get("lmStudioBaseUrl"),
+      enableAdminTools: g.get("enableAdminTools"),
+      exposeGranularAdminTools: g.get("exposeGranularAdminTools"),
       // per-chat setting
       topK: c.get("topK"),
     });

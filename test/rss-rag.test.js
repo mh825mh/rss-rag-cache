@@ -12,7 +12,7 @@ process.env.RSS_RAG_DATA_DIR = dataDir;
 
 const { chunkText, sanitizeFts, indexEntries, reindexMissing, retrieve, contextualEmbedInput } = await import("../lib/retriever.js");
 const { normalizeSettings, appendFeed, removeFeed, loadFeeds } = await import("../lib/config.js");
-const { bufferToFloat32 } = await import("../lib/embedder.js");
+const { bufferToFloat32, float32ToBuffer } = await import("../lib/embedder.js");
 const { getDb, closeDb, getMeta, saveFeedState, getAllFeedStates } = await import("../lib/db.js");
 
 // Deterministic 8-dim unit vector derived from the input text. Because the fake
@@ -377,7 +377,7 @@ test("getDiagnostics reports counts, coverage, schema version and suggestions", 
   assert.ok(d.chunks >= 1);
   assert.equal(typeof d.embeddingCoveragePct, "number");
   assert.ok(Array.isArray(d.suggestions) && d.suggestions.length >= 1);
-  assert.equal(d.schemaVersion, 8);
+  assert.equal(d.schemaVersion, 10);
   assert.equal(typeof d.vectorIndex, "object");
   assert.equal(typeof d.unstyledChunks, "number");
   assert.equal(typeof d.contextualChunks, "number");
@@ -480,4 +480,114 @@ test("reindexMissing upgrades chunks whose embed_style is stale", async () => {
   const stale = db.prepare(`SELECT COUNT(*) AS n FROM chunks WHERE entry_id = ? AND embed_style IS NULL`).get(entry.id).n;
   assert.equal(stale, 0);
 });
+
+// --- WP-1: filters pushed into candidate generation -------------------------
+
+test("resolveFilteredEntryIds returns null with no filters and exact matches otherwise", async () => {
+  const { resolveFilteredEntryIds } = await import("../lib/retriever.js");
+  const db = getDb();
+  const now = Date.now();
+
+  await indexEntries([
+    { guid: "rf-1", title: "RF One", link: "https://rf/1", feed_url: "https://feed/rf-alpha-unique", author: "Alice Rfunique", collection: "rfresearch", content: "rf alpha body", pub_date: now - 1000, tags: ["niche", "research"] },
+    { guid: "rf-2", title: "RF Two", link: "https://rf/2", feed_url: "https://feed/rf-beta-unique", author: "Bob Rfunique", collection: "rfnews", content: "rf beta body", pub_date: now - 10 * 86400e3, tags: ["nichetag-extra"] },
+    { guid: "rf-3", title: "RF Three", link: "https://rf/3", feed_url: "https://feed/rf-alpha-unique", author: "Alice Rfunique", content: "rf gamma body", pub_date: now, tags: null },
+  ], testSettings());
+
+  const idOf = (guid) => Number(db.prepare(`SELECT id FROM entries WHERE guid = ?`).get(guid).id);
+
+  // No filters active → null (unfiltered fast path).
+  assert.equal(resolveFilteredEntryIds(db, {}), null);
+
+  // Tag is an exact token match: "niche" must not match "nichetag-extra", and
+  // a NULL tags column never matches.
+  const tagged = resolveFilteredEntryIds(db, { tagFilter: "niche" });
+  assert.equal(tagged.size, 1);
+  assert.ok(tagged.has(idOf("rf-1")));
+  assert.equal(tagged.has(idOf("rf-2")), false);
+  assert.equal(tagged.has(idOf("rf-3")), false);
+
+  // Collection is an exact (case-insensitive) match.
+  const col = resolveFilteredEntryIds(db, { collectionFilter: "rfresearch" });
+  assert.equal(col.size, 1);
+  assert.ok(col.has(idOf("rf-1")));
+
+  // Feed and author are case-insensitive substring matches.
+  assert.equal(resolveFilteredEntryIds(db, { feedFilter: "feed/rf-alpha-unique" }).size, 2);
+  assert.equal(resolveFilteredEntryIds(db, { authorFilter: "alice rfunique" }).size, 2);
+
+  // Recency cutoff (what `days` compiles to).
+  const recent = resolveFilteredEntryIds(db, { cutoff: now - 7 * 86400e3 });
+  assert.equal(recent.has(idOf("rf-1")), true);
+  assert.equal(recent.has(idOf("rf-2")), false);
+  assert.equal(recent.has(idOf("rf-3")), true);
+
+  // The raw `days`/`after`/`before` keys are accepted for direct callers.
+  const recentDays = resolveFilteredEntryIds(db, { days: 7 });
+  assert.equal(recentDays.has(idOf("rf-2")), false);
+  assert.equal(recentDays.has(idOf("rf-3")), true);
+});
+
+test("selective tag filters are pushed into candidate generation (RRF, not LIKE fallback)", async () => {
+  const s = testSettings();
+  const db = getDb();
+  const now = Date.now();
+  const FEED = "https://f/niche";
+
+  // Three exact-tagged entries that deliberately do NOT contain the query token
+  // "zebraword": they can only surface if the tag filter constrains candidate
+  // generation. Distinct topics keep SimHash from collapsing them as dupes.
+  const exact = [
+    { guid: "niche-1", title: "Niche Findings One", link: "https://n/1", content: "quantum widgets and underwater sonar mapping survey notes" },
+    { guid: "niche-2", title: "Niche Findings Two", link: "https://n/2", content: "neural networks and language model training pipeline design" },
+    { guid: "niche-3", title: "Niche Findings Three", link: "https://n/3", content: "alpine mountain climbing ropes harnesses expedition planning" },
+  ].map((e) => ({ ...e, feed_url: FEED, tags: ["nichetag"], pub_date: now }));
+
+  // A large body of unrelated entries that DO contain the query token and whose
+  // vectors point straight at the query. There are more of them than the vector
+  // candidate list can hold (VEC_LIST_SIZE = 200), so the exact-tagged entries
+  // are crowded out of the unfiltered top-K. Inserted directly with a known
+  // embedding so the crowding is deterministic and fast (no HTTP per row).
+  const qv = vecFor("zebraword");
+  const noiseEmb = float32ToBuffer(Float32Array.from(qv));
+  const insE = db.prepare(
+    `INSERT INTO entries (guid, feed_url, title, link, author, pub_date, summary, content, title_key, tags, cached_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+  );
+  const insC = db.prepare(`INSERT INTO chunks (entry_id, chunk_index, text, embedding, norm, embed_style) VALUES (?,?,?,?,?,?)`);
+  for (let i = 0; i < 210; i++) {
+    const text = `zebraword zebraword noise story number ${i}`;
+    const info = insE.run(`noise-${i}`, FEED, `Noise Story ${i}`, `https://noise/${i}`, null, now, "", text, `noise story ${i}`, "other", now);
+    insC.run(Number(info.lastInsertRowid), 0, text, noiseEmb, 1, "plain-v1");
+  }
+
+  // Tags that merely *contain* the filter as a substring. A loose LIKE fallback
+  // would wrongly match these.
+  const collision = [
+    { guid: "collide-1", title: "Collision Story One", link: "https://noise/c1", feed_url: FEED, tags: ["nichetag-extra"], pub_date: now, content: "zebraword collision body" },
+    { guid: "collide-2", title: "Collision Story Two", link: "https://noise/c2", feed_url: FEED, tags: ["nichetag-extra"], pub_date: now, content: "zebraword collision body two" },
+  ];
+
+  // indexEntries invalidates the vector index, so it must run after the direct
+  // noise inserts; retrieval then rebuilds the index including both.
+  await indexEntries([...exact, ...collision], s);
+
+  const res = await retrieve("zebraword", s, { tag: "nichetag", limit: 10 });
+  assert.deepEqual(
+    res.map((r) => r.title).sort(),
+    ["Niche Findings One", "Niche Findings Three", "Niche Findings Two"],
+  );
+  for (const r of res) {
+    // `score` is only emitted by the fused RRF path, never by fallbackSearch.
+    assert.equal(typeof r.score, "number");
+    assert.ok(Number.isFinite(r.score), "result should come from the RRF path, not the LIKE fallback");
+    assert.ok(r.tags.includes("nichetag"));
+  }
+  assert.ok(!res.some((r) => /Collision/.test(r.title)), "substring tag must not leak in");
+
+  // A filter with zero matching entries short-circuits to an empty result
+  // rather than degrading to a loose fallback search.
+  assert.deepEqual(await retrieve("zebraword", s, { tag: "does-not-exist" }), []);
+});
+
 

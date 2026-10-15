@@ -201,4 +201,22 @@ export const globalConfigSchematics = createConfigSchematics()
     },
     "http://localhost:1234",
   )
+  .field(
+    "enableAdminTools",
+    "boolean",
+    {
+      displayName: "Enable Admin Tools",
+      subtitle: "Expose admin_rss_cache (diagnostics, optimize, prune, reindex, reembed, debug search). Off by default.",
+    },
+    false,
+  )
+  .field(
+    "exposeGranularAdminTools",
+    "boolean",
+    {
+      displayName: "Expose Granular Admin Tools",
+      subtitle: "Also register legacy individual admin/feed tools. Off by default; prefer manage_rss_feeds/admin_rss_cache.",
+    },
+    false,
+  )
   .build();
