@@ -377,7 +377,7 @@ test("getDiagnostics reports counts, coverage, schema version and suggestions", 
   assert.ok(d.chunks >= 1);
   assert.equal(typeof d.embeddingCoveragePct, "number");
   assert.ok(Array.isArray(d.suggestions) && d.suggestions.length >= 1);
-  assert.equal(d.schemaVersion, 10);
+  assert.equal(d.schemaVersion, 11);
   assert.equal(typeof d.vectorIndex, "object");
   assert.equal(typeof d.unstyledChunks, "number");
   assert.equal(typeof d.contextualChunks, "number");
@@ -591,3 +591,73 @@ test("selective tag filters are pushed into candidate generation (RRF, not LIKE 
 });
 
 
+
+// --- anti-ban: refresh-level ban reporting and per-host pause -----------------
+
+test("refreshFeeds reports a banned host, pauses it, and persists the ban", async () => {
+  const { refreshFeeds } = await import("../lib/retriever.js");
+  const { resetHttpPolicy } = await import("../lib/fetcher.js");
+  const { getHostState, clearHostState } = await import("../lib/db.js");
+  resetHttpPolicy();
+
+  let hits = 0;
+  const blocked = http.createServer((req, res) => {
+    hits++;
+    res.writeHead(403, { "content-type": "text/html" });
+    res.end("<html><title>Just a moment...</title><body>checking your browser</body></html>");
+  });
+  await new Promise((r) => blocked.listen(0, "127.0.0.1", r));
+  const feedUrl = `http://127.0.0.1:${blocked.address().port}/feed.xml`;
+  const host = new URL(feedUrl).host;
+
+  try {
+    const res = await refreshFeeds(testSettings({ respectRobotsTxt: false }), [feedUrl]);
+
+    assert.equal(hits, 1, "a hard 403 must not be retried");
+    assert.equal(res.failedFeeds.length, 1);
+    assert.equal(res.failedFeeds[0].banned, true);
+    assert.equal(res.failedFeeds[0].banKind, "blocked");
+
+    assert.ok(res.bans.length >= 1, "the ban is reported in the refresh result");
+    assert.ok(res.bans.some((b) => b.host === host && b.terminal));
+
+    const paused = res.blockedHosts.find((h) => h.host === host);
+    assert.ok(paused, "the host appears in blockedHosts");
+    assert.ok(paused.retryInMinutes > 0);
+
+    const persisted = getHostState(host);
+    assert.ok(persisted, "ban state is persisted across refreshes");
+    assert.equal(persisted.ban_kind, "blocked");
+    assert.ok(persisted.next_retry_at > Date.now());
+  } finally {
+    clearHostState(host);
+    await new Promise((r) => blocked.close(r));
+  }
+});
+
+test("a paused host is skipped on the next refresh without a request", async () => {
+  const { refreshFeeds } = await import("../lib/retriever.js");
+  const { resetHttpPolicy } = await import("../lib/fetcher.js");
+  const { saveHostState, clearHostState } = await import("../lib/db.js");
+  resetHttpPolicy();
+
+  let hits = 0;
+  const srv = http.createServer((req, res) => {
+    hits++;
+    res.writeHead(200, { "content-type": "application/rss+xml" });
+    res.end('<?xml version="1.0"?><rss version="2.0"><channel><title>T</title></channel></rss>');
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const feedUrl = `http://127.0.0.1:${srv.address().port}/feed.xml`;
+  const host = new URL(feedUrl).host;
+
+  saveHostState({ host, ban_kind: "blocked", ban_count: 1, last_ban_at: Date.now(), next_retry_at: Date.now() + 600_000, last_status: 403, last_error: "blocked" });
+  try {
+    const res = await refreshFeeds(testSettings({ respectRobotsTxt: false }), [feedUrl]);
+    assert.equal(hits, 0, "no request while the host is paused");
+    assert.ok(res.blockedHosts.some((h) => h.host === host));
+  } finally {
+    clearHostState(host);
+    await new Promise((r) => srv.close(r));
+  }
+});

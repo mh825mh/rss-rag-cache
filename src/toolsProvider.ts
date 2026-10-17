@@ -23,6 +23,7 @@ import {
   backfillEmbeddings
 } from "../lib/retriever.js";
 import { getDiagnostics } from "../lib/diagnostics.js";
+import { log } from "../lib/log.js";
 import { testFeed, discoverFeed } from "../lib/fetcher.js";
 import {
   CORE_TOOLS,
@@ -95,6 +96,16 @@ async function refreshAll(s: ReturnType<typeof getSettings>, force = true) {
     backfill = { error: (e as Error).message };
   }
 
+  // A block is never silent: log a loud warning and keep the summary in the tool
+  // result so the user (and the model) can see which hosts are paused.
+  const blockedHosts: any[] = (res as any).blockedHosts ?? [];
+  const bans: any[] = (res as any).bans ?? [];
+  if (blockedHosts.length) {
+    log.warn(`⚠️ ${blockedHosts.length} host(s) are blocking us: ${blockedHosts.map((h) => h.host).join(", ")}. They are paused until their ban backoff expires.`);
+  } else if (bans.length) {
+    log.warn(`⚠️ ${bans.length} anti-bot response(s) during this refresh (retries succeeded; no hosts paused).`);
+  }
+
   setMeta("last_refresh", JSON.stringify({
     timestamp: Date.now(),
     added: res.added,
@@ -117,6 +128,8 @@ async function refreshAll(s: ReturnType<typeof getSettings>, force = true) {
     failedFeeds: res.failedFeeds,
     retention: ret,
     backfill,
+    ...(blockedHosts.length ? { blockedHosts, banWarning: `⚠️ ${blockedHosts.length} host(s) are blocking us and have been paused: ${blockedHosts.map((h) => `${h.host} (~${h.retryInMinutes}m)`).join(", ")}` } : {}),
+    ...(bans.length ? { bans } : {}),
   };
 }
 

@@ -88,6 +88,13 @@ export async function main(context: PluginContext): Promise<void> {
         backfill,
       }));
       log.info("auto-refresh complete:", { added: res.added, updated: res.updated ?? 0, notModified: res.notModified, failed: res.failedFeeds.length });
+      const blocked = (res as any).blockedHosts ?? [];
+      if (blocked.length) {
+        log.warn(
+          `⚠️ Anti-ban: ${blocked.length} host(s) are blocking this crawler and have been paused — ` +
+          blocked.map((h: any) => `${h.host} (~${h.retryInMinutes}m)`).join(", "),
+        );
+      }
     } catch (e) {
       log.error("auto-refresh error:", (e as Error).message);
     }

@@ -129,13 +129,71 @@ export const globalConfigSchematics = createConfigSchematics()
     "numeric",
     {
       displayName: "Concurrent Feed Fetches",
-      subtitle: "How many RSS/Atom feeds to fetch at the same time.",
+      subtitle: "How many RSS/Atom feeds to fetch at the same time (across all hosts).",
       min: 1,
       max: 32,
       int: true,
       slider: { step: 1, min: 1, max: 16 },
     },
-    8,
+    4,
+  )
+  .field(
+    "maxConcurrentPerHost",
+    "numeric",
+    {
+      displayName: "Concurrent Requests Per Host",
+      subtitle: "Cap on simultaneous requests to any single domain. Low values are what keep anti-bot firewalls calm.",
+      min: 1,
+      max: 16,
+      int: true,
+      slider: { step: 1, min: 1, max: 8 },
+    },
+    2,
+  )
+  .field(
+    "minRequestGapMs",
+    "numeric",
+    {
+      displayName: "Min Gap Between Requests (ms)",
+      subtitle: "Minimum delay between two requests to the same host. Higher = safer, slower.",
+      min: 200,
+      max: 30000,
+      int: true,
+      slider: { step: 100, min: 200, max: 10000 },
+    },
+    1500,
+  )
+  .field(
+    "requestGapJitterMs",
+    "numeric",
+    {
+      displayName: "Request Gap Jitter (ms)",
+      subtitle: "Random extra delay added to each gap so the crawl pattern is not perfectly regular.",
+      min: 0,
+      max: 30000,
+      int: true,
+      slider: { step: 100, min: 0, max: 10000 },
+    },
+    1500,
+  )
+  .field(
+    "respectRobotsTxt",
+    "boolean",
+    {
+      displayName: "Respect robots.txt",
+      subtitle: "Check robots.txt before scraping HTML pages or fetching full article text. Recommended.",
+    },
+    true,
+  )
+  .field(
+    "contactUserAgent",
+    "string",
+    {
+      displayName: "Contact Info (User-Agent)",
+      subtitle: "Optional contact URL/email appended to the User-Agent so site owners can reach you instead of blocking you.",
+      placeholder: "https://example.com/bot or you@example.com",
+    },
+    "",
   )
   .field(
     "semanticScanLimit",
