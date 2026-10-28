@@ -26,6 +26,17 @@ import { getDiagnostics } from "../lib/diagnostics.js";
 import { log } from "../lib/log.js";
 import { testFeed, discoverFeed } from "../lib/fetcher.js";
 import {
+  buildQueryFeedUrl,
+  isQueryFeedUrl,
+  queryFromFeedUrl,
+  discoverFeedsFor,
+  backfillFromWeb,
+  webSearchDigest,
+  searxngEnabled,
+} from "../lib/searxng.js";
+import { exportOpml, parseOpml } from "../lib/opml.js";
+import { listWatches, addWatch, removeWatch, evaluateWatches } from "../lib/watches.js";
+import {
   CORE_TOOLS,
   ADMIN_TOOL,
   GRANULAR_TOOLS,
@@ -61,6 +72,10 @@ function settingsFromController(ctl: ToolsProviderController) {
       lmStudioBaseUrl: g.get("lmStudioBaseUrl"),
       enableAdminTools: g.get("enableAdminTools"),
       exposeGranularAdminTools: g.get("exposeGranularAdminTools"),
+      searxngBaseUrl: g.get("searxngBaseUrl"),
+      webFallback: g.get("webFallback"),
+      webSourceRetentionDays: g.get("webSourceRetentionDays"),
+      rerankDocs: g.get("rerankDocs"),
       topK: c.get("topK"),
     });
   } catch (e) {
@@ -87,7 +102,16 @@ function getStats() {
 async function refreshAll(s: ReturnType<typeof getSettings>, force = true) {
   const feeds = loadEnabledFeeds(s);
   const res = await refreshFeedsShared(s, feeds, { force });
-  const ret = runRetention(s.retentionDays, s.retentionBasis || "publish_date", loadFeedConfig(s));
+  const ret = runRetention(s.retentionDays, s.retentionBasis || "publish_date", loadFeedConfig(s), s.webSourceRetentionDays);
+
+  // Saved watches are re-evaluated directly after a refresh so their report
+  // covers exactly what this pass brought in.
+  let watchHits: any[] = [];
+  try {
+    watchHits = await evaluateWatches(s);
+  } catch (e) {
+    log.warn("Watch evaluation failed:", (e as Error).message);
+  }
 
   let backfill: any = null;
   try {
@@ -117,6 +141,7 @@ async function refreshAll(s: ReturnType<typeof getSettings>, force = true) {
     failedFeeds: res.failedFeeds,
     retention: ret,
     backfill,
+    watchHits,
   }));
   return {
     feeds: feeds.length,
@@ -124,10 +149,12 @@ async function refreshAll(s: ReturnType<typeof getSettings>, force = true) {
     updated: res.updated ?? 0,
     notModified: res.notModified,
     skippedBackoff: res.skippedBackoff?.length ?? 0,
+    notDue: (res as any).notDue ?? [],
     failedCount: res.failedFeeds.length,
     failedFeeds: res.failedFeeds,
     retention: ret,
     backfill,
+    ...(watchHits.length ? { watchHits } : {}),
     ...(blockedHosts.length ? { blockedHosts, banWarning: `⚠️ ${blockedHosts.length} host(s) are blocking us and have been paused: ${blockedHosts.map((h) => `${h.host} (~${h.retryInMinutes}m)`).join(", ")}` } : {}),
     ...(bans.length ? { bans } : {}),
   };
@@ -139,7 +166,7 @@ async function refreshAll(s: ReturnType<typeof getSettings>, force = true) {
 
 const searchRssCacheTool = tool({
   name: "search_rss_cache",
-  description: "Semantic + keyword hybrid search over the local RSS RAG cache. Filter by recency (days or after/before), feed (URL substring), author, tag, or collection. Sort by relevance (default) or date, and paginate with limit/offset.",
+  description: "Semantic + keyword hybrid search over the local RSS RAG cache. Filter by recency (days or after/before), feed (URL substring), author, tag, collection, or starred-only. Sort by relevance (default) or date, and paginate with limit/offset. If nothing matches and a local SearXNG is configured with web fallback enabled, webResults are appended so the query can still be answered from the live web.",
   parameters: {
     query: z.string(),
     days: z.number().optional(),
@@ -149,17 +176,37 @@ const searchRssCacheTool = tool({
     author: z.string().optional(),
     tag: z.string().optional(),
     collection: z.string().optional(),
+    starred: z.boolean().optional(),
     sort: z.enum(["relevance", "date"]).optional(),
     limit: z.number().optional(),
     offset: z.number().optional(),
   },
-  implementation: async ({ query, days, after, before, feed, author, tag, collection, sort, limit, offset }: {
+  implementation: async ({ query, days, after, before, feed, author, tag, collection, starred, sort, limit, offset }: {
     query: string; days?: number; after?: string; before?: string; feed?: string; author?: string;
-    tag?: string; collection?: string; sort?: "relevance" | "date"; limit?: number; offset?: number;
+    tag?: string; collection?: string; starred?: boolean; sort?: "relevance" | "date"; limit?: number; offset?: number;
   }) => {
     const s = getSettings();
-    const results = await retrieve(query, s, { days, after, before, feed, author, tag, collection, sort, limit, offset });
-    if (!results.length) return { count: 0, results: [], note: "No matches." };
+    const results = await retrieve(query, s, { days, after, before, feed, author, tag, collection, starred, sort, limit, offset });
+    if (!results.length) {
+      const response: Record<string, any> = { count: 0, results: [], note: "No matches." };
+      // Live web fallback (opt-in + SearXNG configured): append token-cheap web
+      // results so the model answers from the open web instead of claiming
+      // ignorance — and can offer admin backfill_web to remember it next time.
+      if (s.webFallback && searxngEnabled(s)) {
+        try {
+          const web = await webSearchDigest(s, query, { limit: 5 });
+          if (web.length) {
+            response.webResults = web;
+            response.note =
+              "No matches in the local cache. These are LIVE WEB results from local SearXNG (not cached); " +
+              "with the admin tool enabled you can run admin_rss_cache action:'backfill_web' to index this topic into the cache.";
+          }
+        } catch (e) {
+          response.searxError = (e as Error).message;
+        }
+      }
+      return response;
+    }
     return {
       count: results.length,
       results: results.map((r: any) => ({
@@ -170,6 +217,8 @@ const searchRssCacheTool = tool({
         author: r.author,
         date: r.pub_date_iso,
         tags: r.tags,
+        sourceType: r.sourceType,
+        starred: r.starred,
         score: typeof r.score === "number" ? Number(r.score.toFixed(3)) : undefined,
         similarity: typeof r.similarity === "number" ? Number(r.similarity.toFixed(3)) : undefined,
         snippet: (r.text || "").slice(0, 600),
@@ -202,12 +251,12 @@ const getRssArticleTool = tool({
     let entry: any;
     if (entryId) {
       entry = db.prepare(`
-        SELECT id, guid, feed_url, title, link, pub_date, author, tags, collection, content, cached_at
+        SELECT id, guid, feed_url, title, link, pub_date, author, tags, collection, content, cached_at, source_type, starred, is_read
         FROM entries WHERE id = ?
       `).get(entryId);
     } else if (url) {
       entry = db.prepare(`
-        SELECT id, guid, feed_url, title, link, pub_date, author, tags, collection, content, cached_at
+        SELECT id, guid, feed_url, title, link, pub_date, author, tags, collection, content, cached_at, source_type, starred, is_read
         FROM entries WHERE link = ? OR guid = ? LIMIT 1
       `).get(url, url);
     }
@@ -241,6 +290,9 @@ const getRssArticleTool = tool({
         pubDate: isoDate(entry.pub_date),
         author: entry.author || null,
         collection: entry.collection || null,
+        sourceType: entry.source_type || "rss",
+        starred: !!Number(entry.starred),
+        read: !!Number(entry.is_read),
         tags: parsedTags,
         cachedAt: entry.cached_at ? isoDate(entry.cached_at) : null,
         totalChars,
@@ -288,18 +340,34 @@ const getRecentCacheArticlesTool = tool({
 
 const manageRssFeedsTool = tool({
   name: "manage_rss_feeds",
-  description: "Manage RSS/Atom feeds: list feeds, add a feed (with auto-discovery), remove a feed, test a URL, configure per-feed overrides, or trigger a refresh.",
+  description: "Manage RSS/Atom feeds: list feeds, add a feed (with auto-discovery) or a searxng query feed ('subscribe to a topic'), remove a feed, test a URL/query, configure per-feed overrides, trigger a refresh, discover feeds for a topic/site via local SearXNG, set article starred/read state, or import/export the feed list as OPML.",
   parameters: {
-    action: z.enum(["list", "add", "remove", "test", "configure", "refresh"]),
+    action: z.enum(["list", "add", "remove", "test", "configure", "refresh", "discover", "set_state", "import_opml", "export_opml"]),
     url: z.string().optional(),
+    query: z.string().optional(),
+    categories: z.string().optional(),
+    language: z.string().optional(),
+    timeRange: z.string().optional(),
     options: z.record(z.any()).optional(),
     force: z.boolean().optional(),
+    xml: z.string().optional(),
+    entryId: z.number().optional(),
+    starred: z.boolean().optional(),
+    read: z.boolean().optional(),
   },
-  implementation: async ({ action, url, options, force }: {
-    action: "list" | "add" | "remove" | "test" | "configure" | "refresh";
+  implementation: async ({ action, url, query, categories, language, timeRange, options, force, xml, entryId, starred, read }: {
+    action: "list" | "add" | "remove" | "test" | "configure" | "refresh" | "discover" | "set_state" | "import_opml" | "export_opml";
     url?: string;
+    query?: string;
+    categories?: string;
+    language?: string;
+    timeRange?: string;
     options?: Record<string, any>;
     force?: boolean;
+    xml?: string;
+    entryId?: number;
+    starred?: boolean;
+    read?: boolean;
   }) => {
     const s = getSettings();
     switch (action) {
@@ -322,9 +390,18 @@ const manageRssFeedsTool = tool({
           backingOff: !!f.next_retry_at && f.next_retry_at > now,
           error: f.last_error || undefined,
         }));
+        // Annotate every feed with its type; searxng query feeds carry their
+        // original query so `list` is readable even for feeds.txt-only entries.
+        const annotatedFeeds = feedConfigs.map((f: any) =>
+          f.type === "searxng-query" || isQueryFeedUrl(f.url)
+            ? { ...f, type: "searxng-query", query: f.query ?? queryFromFeedUrl(f.url) }
+            : f
+        );
+        const webEntries = (getDb().prepare(`SELECT COUNT(*) AS c FROM entries WHERE COALESCE(source_type, 'rss') != 'rss'`).get() as any).c;
         return {
-          feeds: feedConfigs,
+          feeds: annotatedFeeds,
           feedUrls: feedConfigs.map((f: any) => f.url),
+          webEntries,
           feedStates,
           entries: stats.entries,
           chunks: stats.chunks,
@@ -338,9 +415,27 @@ const manageRssFeedsTool = tool({
         };
       }
       case "add": {
-        if (!url) return { error: "url is required for action 'add'" };
+        if (query && !url) {
+          // SearXNG query feed: the feed URL is the query rendered as RSS, so
+          // the whole fetch/parse pipeline works unchanged.
+          if (!searxngEnabled(s)) {
+            return { error: "Query feeds require a local SearXNG: set searxngBaseUrl in plugin settings." };
+          }
+          const feedUrl = buildQueryFeedUrl(s.searxngBaseUrl, query, { categories, language, timeRange });
+          const check = await testFeed(feedUrl);
+          if (!check.ok) {
+            return { error: `SearXNG query feed failed its test: ${check.error}`, feedUrl };
+          }
+          const wopts: Record<string, any> = { type: "searxng-query", query, ...(categories ? { categories } : {}) };
+          const opts = options && Object.keys(options).length > 0 ? { ...options, ...wopts } : wopts;
+          const added = appendFeed(feedUrl, s);
+          if (!added.ok) return { ...added, feedUrl, items: check.items };
+          setFeedOptions(feedUrl, opts, s);
+          return { ...added, feedUrl, query, type: "searxng-query", items: check.items, sample: check.sample };
+        }
+        if (!url) return { error: "url (or query) is required for action 'add'" };
         let targetUrl = url;
-        const looksLikeFeed = /\.(xml|rss|atom)(\?|$)/i.test(url) || /\/(rss|feed|feeds)(\/|$|\?)/i.test(url);
+        const looksLikeFeed = /\.(xml|rss|atom)(\?|$)/i.test(url) || /\/(rss|feed|feeds)(\/|$|\?)/i.test(url) || isQueryFeedUrl(url);
         let discoveredInfo: any = null;
         if (!looksLikeFeed) {
           try {
@@ -362,13 +457,82 @@ const manageRssFeedsTool = tool({
         return removeFeed(url, s);
       }
       case "test": {
-        if (!url) return { error: "url is required for action 'test'" };
+        if (query && !url) {
+          if (!searxngEnabled(s)) return { error: "Query feeds require a local SearXNG (searxngBaseUrl setting)." };
+          return testFeed(buildQueryFeedUrl(s.searxngBaseUrl, query, { categories, language, timeRange }));
+        }
+        if (!url) return { error: "url (or query) is required for action 'test'" };
         return testFeed(url);
       }
       case "configure": {
         if (!url) return { error: "url is required for action 'configure'" };
         if (!options || Object.keys(options).length === 0) return { ok: false, reason: "No options supplied" };
         return setFeedOptions(url, options, s);
+      }
+      case "discover": {
+        if (!searxngEnabled(s)) {
+          return { error: "Discovery requires a local SearXNG: set searxngBaseUrl in plugin settings." };
+        }
+        if (!url && !query) return { error: "One of query (topic) or url is required for action 'discover'" };
+        try {
+          return await discoverFeedsFor(s, { topic: query, url });
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      }
+      case "set_state": {
+        // Star / read-state toggles for a cached article (by entryId or url).
+        if (!entryId && !url) return { error: "entryId or url is required for action 'set_state'" };
+        const db = getDb();
+        let id: number | null = null;
+        if (entryId) {
+          const row = db.prepare(`SELECT id FROM entries WHERE id = ?`).get(entryId) as any;
+          if (row) id = Number(row.id);
+        } else {
+          const row = db.prepare(`SELECT id FROM entries WHERE link = ? OR guid = ? LIMIT 1`).get(url, url) as any;
+          if (row) id = Number(row.id);
+        }
+        if (id === null) return { found: false, message: `No article found matching ${entryId ? `id=${entryId}` : `url="${url}"`}` };
+        const sets = [];
+        const params: any[] = [];
+        if (starred !== undefined) { sets.push("starred = ?"); params.push(starred ? 1 : 0); }
+        if (read !== undefined) { sets.push("is_read = ?"); params.push(read ? 1 : 0); }
+        if (!sets.length) return { ok: false, reason: "Set starred and/or read" };
+        params.push(id);
+        db.prepare(`UPDATE entries SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+        return { found: true, entryId: id, starred, read };
+      }
+      case "import_opml": {
+        if (!xml) return { error: "xml is required for action 'import_opml'" };
+        const entries = parseOpml(xml);
+        if (!entries.length) return { ok: false, reason: "No <outline xmlUrl=...> entries found in the OPML document" };
+        let added = 0;
+        const skipped: any[] = [];
+        const imported: any[] = [];
+        for (const e of entries) {
+          try { new URL(e.url); } catch {
+            skipped.push({ url: e.url, reason: "invalid URL" });
+            continue;
+          }
+          const res = appendFeed(e.url, s);
+          if (res.ok) {
+            added++;
+            if (e.tags?.length || (e.title && e.title !== e.url)) {
+              setFeedOptions(e.url, {
+                ...(e.title && e.title !== e.url ? { title: e.title } : {}),
+                ...(e.tags?.length ? { tags: e.tags } : {}),
+              }, s);
+            }
+            imported.push({ url: e.url, title: e.title || undefined });
+          } else {
+            skipped.push({ url: e.url, reason: res.reason });
+          }
+        }
+        return { ok: true, addedCount: added, total: entries.length, imported, skipped };
+      }
+      case "export_opml": {
+        const feeds = loadFeedConfig(s);
+        return { opml: exportOpml(feeds), count: feeds.length };
       }
       case "refresh": {
         return refreshAll(s, force !== false);
@@ -385,9 +549,9 @@ const manageRssFeedsTool = tool({
 
 const adminRssCacheTool = tool({
   name: "admin_rss_cache",
-  description: "Cache administration: health diagnostics, VACUUM/optimize, prune removed feeds, reindex missing embeddings, rebuild vector index, or debug hybrid search.",
+  description: "Cache administration: health diagnostics, VACUUM/optimize, prune removed feeds, reindex missing embeddings, rebuild vector index, debug hybrid search, backfill web results from local SearXNG into the cache ('backfill_web'), or manage saved watch queries ('watches').",
   parameters: {
-    action: z.enum(["diagnostics", "optimize", "prune", "reindex", "reembed", "debug_search"]),
+    action: z.enum(["diagnostics", "optimize", "prune", "reindex", "reembed", "debug_search", "backfill_web", "watches"]),
     query: z.string().optional(),
     days: z.number().optional(),
     after: z.string().optional(),
@@ -396,13 +560,17 @@ const adminRssCacheTool = tool({
     author: z.string().optional(),
     tag: z.string().optional(),
     collection: z.string().optional(),
+    starred: z.boolean().optional(),
     limit: z.number().optional(),
     offset: z.number().optional(),
     batchSize: z.number().optional(),
     rechunk: z.boolean().optional(),
+    subaction: z.enum(["list", "add", "remove"]).optional(),
+    id: z.number().optional(),
+    name: z.string().optional(),
   },
-  implementation: async ({ action, query, days, after, before, feed, author, tag, collection, limit, offset, batchSize, rechunk }: {
-    action: "diagnostics" | "optimize" | "prune" | "reindex" | "reembed" | "debug_search";
+  implementation: async ({ action, query, days, after, before, feed, author, tag, collection, starred, limit, offset, batchSize, rechunk, subaction, id, name }: {
+    action: "diagnostics" | "optimize" | "prune" | "reindex" | "reembed" | "debug_search" | "backfill_web" | "watches";
     query?: string;
     days?: number;
     after?: string;
@@ -411,10 +579,14 @@ const adminRssCacheTool = tool({
     author?: string;
     tag?: string;
     collection?: string;
+    starred?: boolean;
     limit?: number;
     offset?: number;
     batchSize?: number;
     rechunk?: boolean;
+    subaction?: "list" | "add" | "remove";
+    id?: number;
+    name?: string;
   }) => {
     const s = getSettings();
     switch (action) {
@@ -447,7 +619,7 @@ const adminRssCacheTool = tool({
       }
       case "debug_search": {
         if (!query) return { error: "query is required for action 'debug_search'" };
-        const results = await retrieve(query, s, { days, after, before, feed, author, tag, collection, limit, offset, debug: true });
+        const results = await retrieve(query, s, { days, after, before, feed, author, tag, collection, starred, limit, offset, debug: true });
         return {
           count: results.length,
           results: results.map((r: any) => ({
@@ -463,6 +635,50 @@ const adminRssCacheTool = tool({
             snippet: (r.text || "").slice(0, 600),
           })),
         };
+      }
+      case "backfill_web": {
+        if (!searxngEnabled(s)) {
+          return { error: "backfill_web requires a local SearXNG: set searxngBaseUrl in plugin settings." };
+        }
+        if (!query) return { error: "query is required for action 'backfill_web'" };
+        // Reuse the normal search-filter params as the tag/collection hints.
+        try {
+          const res = await backfillFromWeb(s, {
+            query,
+            limit,
+            categories: collection || tag || undefined,
+          });
+          return {
+            ...res,
+            hint: "Web entries are marked sourceType 'web' and expire via the webSourceRetentionDays setting.",
+          };
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      }
+      case "watches": {
+        const sub = subaction || "list";
+        try {
+          if (sub === "add") {
+            if (!name || !query) return { error: "name and query are required for watches subaction 'add'" };
+            const filters: Record<string, any> = {};
+            if (days !== undefined) filters.days = days;
+            if (after !== undefined) filters.after = after;
+            if (before !== undefined) filters.before = before;
+            if (feed !== undefined) filters.feed = feed;
+            if (author !== undefined) filters.author = author;
+            if (tag !== undefined) filters.tag = tag;
+            if (collection !== undefined) filters.collection = collection;
+            return addWatch({ name, query, ...filters }, s);
+          }
+          if (sub === "remove") {
+            if (id === undefined) return { error: "id is required for watches subaction 'remove'" };
+            return removeWatch(id);
+          }
+          return { ok: true, watches: listWatches() };
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
       }
       default:
         return { error: `Unknown action: ${action}` };

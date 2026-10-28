@@ -377,7 +377,7 @@ test("getDiagnostics reports counts, coverage, schema version and suggestions", 
   assert.ok(d.chunks >= 1);
   assert.equal(typeof d.embeddingCoveragePct, "number");
   assert.ok(Array.isArray(d.suggestions) && d.suggestions.length >= 1);
-  assert.equal(d.schemaVersion, 11);
+  assert.equal(d.schemaVersion, 14);
   assert.equal(typeof d.vectorIndex, "object");
   assert.equal(typeof d.unstyledChunks, "number");
   assert.equal(typeof d.contextualChunks, "number");

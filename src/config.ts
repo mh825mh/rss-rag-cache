@@ -277,4 +277,49 @@ export const globalConfigSchematics = createConfigSchematics()
     },
     false,
   )
+  .field(
+    "searxngBaseUrl",
+    "string",
+    {
+      displayName: "SearXNG Base URL (Local)",
+      subtitle: "Optional local SearXNG instance, e.g. http://localhost:8080. Enables query feeds ('subscribe to a topic'), web-result backfill into the cache, and feed discovery. Empty = disabled.",
+      placeholder: "http://localhost:8080",
+    },
+    "",
+  )
+  .field(
+    "webFallback",
+    "boolean",
+    {
+      displayName: "Live Web Fallback On Cache Miss",
+      subtitle: "When a cache search returns no results, also run the query through local SearXNG and return web results (title + URL + snippet only) so the model can still answer honestly. Requires SearXNG json format enabled.",
+    },
+    false,
+  )
+  .field(
+    "webSourceRetentionDays",
+    "numeric",
+    {
+      displayName: "Web-Sourced Entry Retention (Days)",
+      subtitle: "How long entries backfilled from the web into the cache are kept before they expire (they never outlive regular feeds).",
+      min: 1,
+      max: 365,
+      int: true,
+      slider: { step: 1, min: 1, max: 90 },
+    },
+    14,
+  )
+  .field(
+    "rerankDocs",
+    "numeric",
+    {
+      displayName: "Rerank Shortlist (0 = Off)",
+      subtitle: "If a reranker model is loaded in LM Studio, re-rank this many fused candidates per search for higher precision on ambiguous queries. Falls back silently when no reranker is loaded.",
+      min: 0,
+      max: 200,
+      int: true,
+      slider: { step: 10, min: 0, max: 100 },
+    },
+    0,
+  )
   .build();

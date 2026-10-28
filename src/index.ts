@@ -16,6 +16,7 @@ import { getDb, setMeta } from "../lib/db.js";
 import { runRetention, getLastRefresh } from "../lib/retention.js";
 import { refreshFeedsShared, isRefreshing, backfillEmbeddings } from "../lib/retriever.js";
 import { listModels } from "../lib/embedder.js";
+import { evaluateWatches } from "../lib/watches.js";
 import { log } from "../lib/log.js";
 
 export async function main(context: PluginContext): Promise<void> {
@@ -70,7 +71,16 @@ export async function main(context: PluginContext): Promise<void> {
     try {
       const feeds = loadEnabledFeeds(s);
       const res = await refreshFeedsShared(s, feeds);
-      const ret = runRetention(s.retentionDays, s.retentionBasis || "publish_date", loadFeedConfig(s));
+      const ret = runRetention(s.retentionDays, s.retentionBasis || "publish_date", loadFeedConfig(s), s.webSourceRetentionDays);
+      let watchHits: any[] = [];
+      try {
+        watchHits = await evaluateWatches(s);
+      } catch (e) {
+        log.warn("Watch evaluation failed:", (e as Error).message);
+      }
+      if (watchHits.length) {
+        log.info(`Watches: ${watchHits.map((w) => `"${w.name}" matched ${w.newCount} new`).join(", ")}`);
+      }
       let backfill: any = null;
       try {
         backfill = await backfillEmbeddings(s, { batchSize: 500, maxBatches: 8 });
@@ -86,6 +96,7 @@ export async function main(context: PluginContext): Promise<void> {
         failedFeeds: res.failedFeeds,
         retention: ret,
         backfill,
+        watchHits,
       }));
       log.info("auto-refresh complete:", { added: res.added, updated: res.updated ?? 0, notModified: res.notModified, failed: res.failedFeeds.length });
       const blocked = (res as any).blockedHosts ?? [];
