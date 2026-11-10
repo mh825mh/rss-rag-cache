@@ -77,6 +77,11 @@ function settingsFromController(ctl: ToolsProviderController) {
       webSourceRetentionDays: g.get("webSourceRetentionDays"),
       rerankDocs: g.get("rerankDocs"),
       topK: c.get("topK"),
+      rrfK: g.get("rrfK"),
+      ftsListSize: g.get("ftsListSize"),
+      vecListSize: g.get("vecListSize"),
+      mmrLambda: g.get("mmrLambda"),
+      recencyBlend: g.get("recencyBlend"),
     });
   } catch (e) {
     console.warn("[rss-rag] Could not read plugin config; using defaults:", (e as Error).message);
@@ -106,7 +111,7 @@ async function refreshAll(s: ReturnType<typeof getSettings>, force = true) {
 
   // Saved watches are re-evaluated directly after a refresh so their report
   // covers exactly what this pass brought in.
-  let watchHits: any[] = [];
+  let watchHits: any = [];
   try {
     watchHits = await evaluateWatches(s);
   } catch (e) {
@@ -180,13 +185,14 @@ const searchRssCacheTool = tool({
     sort: z.enum(["relevance", "date"]).optional(),
     limit: z.number().optional(),
     offset: z.number().optional(),
+    withinEntryIds: z.string().optional(),
   },
-  implementation: async ({ query, days, after, before, feed, author, tag, collection, starred, sort, limit, offset }: {
+  implementation: async ({ query, days, after, before, feed, author, tag, collection, starred, sort, limit, offset, withinEntryIds }: {
     query: string; days?: number; after?: string; before?: string; feed?: string; author?: string;
-    tag?: string; collection?: string; starred?: boolean; sort?: "relevance" | "date"; limit?: number; offset?: number;
+    tag?: string; collection?: string; starred?: boolean; sort?: "relevance" | "date"; limit?: number; offset?: number; withinEntryIds?: string;
   }) => {
     const s = getSettings();
-    const results = await retrieve(query, s, { days, after, before, feed, author, tag, collection, starred, sort, limit, offset });
+    const results = await retrieve(query, s, { days, after, before, feed, author, tag, collection, starred, sort, limit, offset, withinEntryIds });
     if (!results.length) {
       const response: Record<string, any> = { count: 0, results: [], note: "No matches." };
       // Live web fallback (opt-in + SearXNG configured): append token-cheap web

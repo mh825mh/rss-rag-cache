@@ -17,7 +17,7 @@ import { runRetention, getLastRefresh } from "../lib/retention.js";
 import { refreshFeedsShared, isRefreshing, backfillEmbeddings } from "../lib/retriever.js";
 import { listModels } from "../lib/embedder.js";
 import { evaluateWatches } from "../lib/watches.js";
-import { log } from "../lib/log.js";
+import { log, configId, indexId } from "../lib/log.js";
 
 export async function main(context: PluginContext): Promise<void> {
   // Register UI settings and tools
@@ -38,12 +38,20 @@ export async function main(context: PluginContext): Promise<void> {
       const models = await listModels(s.lmStudioBaseUrl);
       const short = String(s.embeddingModel).split(/[/:]/).pop();
       if (models.length && !models.some((m) => String(m).includes(String(short)))) {
-        log.warn(`Embedding model "${s.embeddingModel}" not detected in LM Studio server (got: ${models.slice(0, 5).join(", ") || "none"}). Search will fall back to keywords until it is loaded.`);
+        log.warn("embed-model-not-detected", {
+          version: "1.6.0",
+          model: s.embeddingModel,
+          availableModels: models.slice(0, 5).join(", ") || "none",
+          lmStudioBaseUrl: s.lmStudioBaseUrl,
+        });
         return false;
       }
       return models.length > 0;
     } catch (e) {
-      log.warn("Could not check embedding model:", (e as Error).message);
+      log.warn("could-not-check-embed-model", {
+        version: "1.6.0",
+        error: (e as Error).message,
+      });
       return false;
     }
   }
@@ -54,10 +62,20 @@ export async function main(context: PluginContext): Promise<void> {
     try {
       const res = await backfillEmbeddings(s, { batchSize: 500, maxBatches: 20 });
       if (res.updated > 0 || res.entriesRechunked > 0) {
-        log.info(`Backfill: embedded ${res.updated} chunk(s), re-chunked ${res.entriesRechunked} entry(ies).`);
+        log.info("backfill-complete", {
+          version: "1.6.0",
+          added: res.updated,
+          reChunked: res.entriesRechunked,
+          configId: configId(s),
+          indexId: indexId(s, getDb()),
+        });
       }
     } catch (e) {
-      log.warn("Startup backfill failed:", (e as Error).message);
+      log.warn("startup-backfill-failed", {
+        version: "1.6.0",
+        error: (e as Error).message,
+        configId: configId(s),
+      });
     }
   }
 
@@ -72,7 +90,7 @@ export async function main(context: PluginContext): Promise<void> {
       const feeds = loadEnabledFeeds(s);
       const res = await refreshFeedsShared(s, feeds);
       const ret = runRetention(s.retentionDays, s.retentionBasis || "publish_date", loadFeedConfig(s), s.webSourceRetentionDays);
-      let watchHits: any[] = [];
+      let watchHits: any = [];
       try {
         watchHits = await evaluateWatches(s);
       } catch (e) {
@@ -98,7 +116,17 @@ export async function main(context: PluginContext): Promise<void> {
         backfill,
         watchHits,
       }));
-      log.info("auto-refresh complete:", { added: res.added, updated: res.updated ?? 0, notModified: res.notModified, failed: res.failedFeeds.length });
+      log.info("auto-refresh-complete", {
+    version: "1.6.0",
+    operationId: /* will be set by refreshFeedsShared */ "",
+    added: res.added,
+    updated: res.updated ?? 0,
+    notModified: res.notModified,
+    failedFeeds: res.failedFeeds.length,
+    configId: configId(s),
+    indexId: indexId(s, getDb()),
+    totalTimeSeconds: res.totalTimeSeconds,
+  });
       const blocked = (res as any).blockedHosts ?? [];
       if (blocked.length) {
         log.warn(
@@ -112,7 +140,13 @@ export async function main(context: PluginContext): Promise<void> {
   }
 
   checkModel().then((ok) => {
-    if (ok) startupBackfill();
+    if (ok) {
+      // fire-and-forget: backfill may fail if model is offline; plugin stays
+      // available in keyword-only mode. Rejections are logged inside startupBackfill.
+      startupBackfill().catch((e) => {
+        log.error("startup-backfill-uncaught-error:", e.message);
+      });
+    }
   });
 
   const s0 = getSettings();
