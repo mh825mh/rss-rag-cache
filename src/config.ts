@@ -322,4 +322,67 @@ export const globalConfigSchematics = createConfigSchematics()
     },
     0,
   )
+  .field(
+    "rrfK",
+    "numeric",
+    {
+      displayName: "RRF K Constant",
+      subtitle: "Controls the rank decay in Reciprocal Rank Fusion. Higher = flatter rank distribution; lower = steeper preference for top-ranked candidates. Typical range 40–80.",
+      min: 10,
+      max: 200,
+      int: true,
+      slider: { step: 1, min: 10, max: 200 },
+    },
+    60,
+  )
+  .field(
+    "ftsListSize",
+    "numeric",
+    {
+      displayName: "FTS Candidate List Size",
+      subtitle: "Maximum number of candidates returned from each FTS list (trigram + English). Higher = more candidates considered during fusion.",
+      min: 10,
+      max: 200,
+      int: true,
+      slider: { step: 10, min: 10, max: 200 },
+    },
+    60,
+  )
+  .field(
+    "vecListSize",
+    "numeric",
+    {
+      displayName: "Vector Candidate List Size",
+      subtitle: "Maximum number of candidates returned from the vector similarity list. Higher = more candidates considered during fusion.",
+      min: 10,
+      max: 500,
+      int: true,
+      slider: { step: 10, min: 10, max: 500 },
+    },
+    200,
+  )
+  .field(
+    "mmrLambda",
+    "numeric",
+    {
+      displayName: "MMR Diversity Lambda",
+      subtitle: "Controls the diversity-relevance tradeoff in Maximal Marginal Relevance. Higher = more diverse results; lower = more relevant-focused. Range 0–1, typical 0.5–0.8.",
+      min: 0,
+      max: 1,
+      step: 0.05,
+    },
+    0.7,
+  )
+  .field(
+    "recencyBlend",
+    "numeric",
+    {
+      displayName: "Recency Blend Ratio",
+      subtitle: "Weight given to RRF score vs recency factor in final score. Higher = more relevance-focused; lower = more recency-influenced. Range 0–1, typical 0.8.",
+      min: 0,
+      max: 1,
+      step: 0.05,
+    },
+    0.8,
+  )
   .build();

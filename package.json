@@ -1,6 +1,6 @@
 {
   "name": "rss-rag-cache",
-  "version": "1.6.0",
+  "version": "1.6.2",
   "private": true,
   "engines": {
     "node": ">=22.5.0"
